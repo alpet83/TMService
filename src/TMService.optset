@@ -1,0 +1,24 @@
+﻿	<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+		<PropertyGroup>
+			<Manifest_File>None</Manifest_File>
+			<Icon_MainIcon>TMService_Icon.ico</Icon_MainIcon>
+			<VerInfo_Keys>CompanyName=Fora-Capital Inc.;FileDescription=Служба точного времени TMService;FileVersion=1.0.2.23;InternalName=TMService;LegalCopyright=(c) 2010 Петров А. М.;LegalTrademarks=;OriginalFilename=TMService.exe;ProductName=SNTP client-server with a statistical analyzer;ProductVersion=1.0.2.22;Comments=</VerInfo_Keys>
+			<VerInfo_Locale>1049</VerInfo_Locale>
+			<VerInfo_Build>23</VerInfo_Build>
+			<VerInfo_IncludeVerInfo>true</VerInfo_IncludeVerInfo>
+			<DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Vcl;Winapi;System.Win;$(DCC_Namespace)</DCC_Namespace>
+			<VerInfo_Release>2</VerInfo_Release>
+			<DCC_ExeOutput>..\bin</DCC_ExeOutput>
+			<DCC_DcuOutput>..\build</DCC_DcuOutput>
+			<DCC_UnitSearchPath>F:\Indy\Lib\Core;F:\Indy\Lib\Protocols;F:\Indy\Lib\System;P:\Trade\Lib;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
+			<DCC_ImageBase>00400000</DCC_ImageBase>
+		</PropertyGroup>
+		<ProjectExtensions>
+			<Borland.Personality>Delphi.Personality.12</Borland.Personality>
+			<Borland.ProjectType>OptionSet</Borland.ProjectType>
+			<BorlandProject>
+				<Delphi.Personality/>
+			</BorlandProject>
+			<ProjectFileVersion>12</ProjectFileVersion>
+		</ProjectExtensions>
+	</Project>

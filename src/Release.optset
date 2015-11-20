@@ -1,0 +1,16 @@
+﻿	<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+		<PropertyGroup>
+			<VerInfo_Build>22</VerInfo_Build>
+			<Manifest_File>$(BDS)\bin\default_app.manifest</Manifest_File>
+			<VerInfo_Keys>CompanyName=Fora-Capital Inc.;FileDescription=Служба точного времени TMService;FileVersion=1.0.2.23;InternalName=TMService;LegalCopyright=(c) 2010 Петров А. М.;LegalTrademarks=;OriginalFilename=TMService.exe;ProductName=SNTP client-server with a statistical analyzer;ProductVersion=1.0.2.22;Comments=</VerInfo_Keys>
+			<VerInfo_Locale>1033</VerInfo_Locale>
+		</PropertyGroup>
+		<ProjectExtensions>
+			<Borland.Personality>Delphi.Personality.12</Borland.Personality>
+			<Borland.ProjectType>OptionSet</Borland.ProjectType>
+			<BorlandProject>
+				<Delphi.Personality/>
+			</BorlandProject>
+			<ProjectFileVersion>12</ProjectFileVersion>
+		</ProjectExtensions>
+	</Project>

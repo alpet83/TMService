@@ -1,0 +1,60 @@
+﻿	<Project xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+		<PropertyGroup>
+			<ProjectGuid>{58C4AD8B-08F3-46A7-B974-516C1D79B048}</ProjectGuid>
+		</PropertyGroup>
+		<ItemGroup>
+			<Projects Include="TMService.dproj">
+				<Dependencies/>
+			</Projects>
+			<Projects Include="test.dproj">
+				<Dependencies/>
+			</Projects>
+			<Projects Include="ClockStat.dproj">
+				<Dependencies/>
+			</Projects>
+		</ItemGroup>
+		<ProjectExtensions>
+			<Borland.Personality>Default.Personality.12</Borland.Personality>
+			<Borland.ProjectType/>
+			<BorlandProject>
+				<Default.Personality/>
+			</BorlandProject>
+		</ProjectExtensions>
+		<Target Name="TMService">
+			<MSBuild Projects="TMService.dproj"/>
+		</Target>
+		<Target Name="TMService:Clean">
+			<MSBuild Projects="TMService.dproj" Targets="Clean"/>
+		</Target>
+		<Target Name="TMService:Make">
+			<MSBuild Projects="TMService.dproj" Targets="Make"/>
+		</Target>
+		<Target Name="test">
+			<MSBuild Projects="test.dproj"/>
+		</Target>
+		<Target Name="test:Clean">
+			<MSBuild Projects="test.dproj" Targets="Clean"/>
+		</Target>
+		<Target Name="test:Make">
+			<MSBuild Projects="test.dproj" Targets="Make"/>
+		</Target>
+		<Target Name="ClockStat">
+			<MSBuild Projects="ClockStat.dproj"/>
+		</Target>
+		<Target Name="ClockStat:Clean">
+			<MSBuild Projects="ClockStat.dproj" Targets="Clean"/>
+		</Target>
+		<Target Name="ClockStat:Make">
+			<MSBuild Projects="ClockStat.dproj" Targets="Make"/>
+		</Target>
+		<Target Name="Build">
+			<CallTarget Targets="TMService;test;ClockStat"/>
+		</Target>
+		<Target Name="Clean">
+			<CallTarget Targets="TMService:Clean;test:Clean;ClockStat:Clean"/>
+		</Target>
+		<Target Name="Make">
+			<CallTarget Targets="TMService:Make;test:Make;ClockStat:Make"/>
+		</Target>
+		<Import Condition="Exists('$(BDS)\Bin\CodeGear.Group.Targets')" Project="$(BDS)\Bin\CodeGear.Group.Targets"/>
+	</Project>

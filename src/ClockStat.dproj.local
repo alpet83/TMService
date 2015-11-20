@@ -1,0 +1,11 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<BorlandProject>
+	<Transactions>
+    <Transaction>1899.12.30 00:00:00.000.349,C:\Users\alpet\Documents\RAD Studio\Projects\Unit1.dfm=P:\Trade\TMServ\ClockStatForm.dfm</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.364,=P:\Trade\TMServ\Unit1.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.659,C:\Users\alpet\Documents\RAD Studio\Projects\Project1.dproj=P:\Trade\TMServ\ClockStat.dproj</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.727,P:\Trade\TMServ\TMSGlobals.pas=P:\Trade\TMServ\Unit1.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.897,=C:\Users\alpet\Documents\RAD Studio\Projects\Unit1.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.349,C:\Users\alpet\Documents\RAD Studio\Projects\Unit1.pas=P:\Trade\TMServ\ClockStatForm.pas</Transaction>
+  </Transactions>
+</BorlandProject>
