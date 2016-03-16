@@ -4,7 +4,8 @@ interface
 
 uses
   Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants, System.Classes, Vcl.Graphics, StrUtils, TMSGlobals,
-  Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Misc, DateTimeTools, VCLTee.TeEngine, Vcl.ExtCtrls, VCLTee.TeeProcs, VCLTee.Chart, VCLTee.Series, Vcl.StdCtrls, StrClasses, VCLTee.TeeFunci;
+  Vcl.Controls, Vcl.Forms, Vcl.Dialogs, Misc, DateTimeTools, VCLTee.TeEngine, Vcl.ExtCtrls, VCLTee.TeeProcs, VCLTee.Chart, VCLTee.Series, Vcl.StdCtrls, StrClasses, VCLTee.TeeFunci,
+  VclTee.TeeGDIPlus;
 
 type
   TMainForm = class(TForm)

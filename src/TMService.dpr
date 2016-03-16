@@ -9,6 +9,7 @@ uses
   madListHardware,
   madListProcesses,
   madListModules,
+  Windows,
   SvcMgr,
   Classes,
   SysUtils,
@@ -40,19 +41,40 @@ begin
   //
   // Application.DelayInitialize := True;
   //
+  StartLogging('');
 
-  g_timer := TVirtualTimer.Create;
-
-  if Application.Installing then
-     WriteLn('Installing the LocalTimeSync service');
-
-  if not Application.DelayInitialize or Application.Installing then  Application.Initialize;
+  if ParamStr(1) = 'wait_dbg' then
+    begin
+     ShowConsole();
+     ODS('[~T]. #DBG: waiting for debugger connect');
+     while not IsDebuggerPresent do Sleep(50);
+    end;
 
   try
-   Application.CreateForm(TsvcTime, svcTime);
+
+    ODS('[~T]. init #1');
+
+    if g_timer = nil then
+      try
+       g_timer := TVirtualTimer.Create;
+      except
+        on E: Exception do
+           ExitProcess(3333);
+      end;
+
+    ODS('[~T]. init #2');
+
+    if Application.Installing then
+       ODS('Installing the LocalTimeSync service');
+
+    ODS('[~T]. init #3');
+    if not Application.DelayInitialize or Application.Installing then  Application.Initialize;
+
+    ODS('[~T]. init #4');
+    Application.CreateForm(TsvcTime, svcTime);
   except
    on E: Exception do
-     OnExceptLog ('Application.CreateForm', E);
+     OnExceptLog ('Application.Init/CreateForm', E);
   end;
 
   try

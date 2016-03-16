@@ -2,12 +2,12 @@
 <BorlandProject>
 	<Transactions>
     <Transaction>1899.12.30 00:00:00.000.879,=P:\Trade\TMServ\TMSGlobals.pas</Transaction>
-    <Transaction>1899.12.30 00:00:00.000.dfm,P:\Trade\TMServ\TMForm.dfm=P:\Trade\TMServ\TMSvc.dfm</Transaction>
-    <Transaction>1899.12.30 00:00:00.000.pas,P:\Trade\lib\WThreads.pas=</Transaction>
-    <Transaction>1899.12.30 00:00:00.000.pas,C:\Documents and Settings\root\Мои документы\RAD Studio\Projects\Unit1.pas=P:\Trade\TMServ\TMForm.pas</Transaction>
-    <Transaction>1899.12.30 00:00:00.000.pas,P:\Trade\TMServ\TMForm.pas=P:\Trade\TMServ\TMSvc.pas</Transaction>
-    <Transaction>1899.12.30 00:00:00.000.dfm,C:\Documents and Settings\root\Мои документы\RAD Studio\Projects\Unit1.dfm=P:\Trade\TMServ\TMForm.dfm</Transaction>
     <Transaction>1899.12.30 00:00:00.000.578,=d:\embarcadero\rad studio\source\Indy10\Core\IdUDPServer.pas</Transaction>
-    <Transaction>1899.12.30 00:00:00.000.dproj,C:\Documents and Settings\root\Мои документы\RAD Studio\Projects\Project1.dproj=P:\Trade\TMServ\TMService.dproj</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.pas,P:\Trade\TMServ\TMSvc.pas=P:\Trade\TMServ\TMForm.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.pas,P:\Trade\lib\WThreads.pas=</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.pas,P:\Trade\TMServ\TMForm.pas=C:\Documents and Settings\root\Мои документы\RAD Studio\Projects\Unit1.pas</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.dfm,P:\Trade\TMServ\TMSvc.dfm=P:\Trade\TMServ\TMForm.dfm</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.dfm,P:\Trade\TMServ\TMForm.dfm=C:\Documents and Settings\root\Мои документы\RAD Studio\Projects\Unit1.dfm</Transaction>
+    <Transaction>1899.12.30 00:00:00.000.dproj,P:\Trade\TMServ\TMService.dproj=C:\Documents and Settings\root\Мои документы\RAD Studio\Projects\Project1.dproj</Transaction>
   </Transactions>
 </BorlandProject>

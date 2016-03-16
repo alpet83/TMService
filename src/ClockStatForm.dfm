@@ -38,12 +38,9 @@ object MainForm: TMainForm
     View3D = False
     TabOrder = 0
     Anchors = [akLeft, akTop, akRight, akBottom]
+    DefaultCanvas = 'TGDIPlusCanvas'
     ColorPaletteIndex = 13
     object Series1: TFastLineSeries
-      Marks.Arrow.Visible = True
-      Marks.Callout.Brush.Color = clBlack
-      Marks.Callout.Arrow.Visible = True
-      Marks.Visible = False
       LinePen.Color = 10708548
       XValues.DateTime = True
       XValues.Name = 'X'

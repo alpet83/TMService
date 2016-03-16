@@ -190,6 +190,11 @@ begin
     StartLogging('');
     ShowConsole;
     // TestMain;
+    // for r := $80 to $FFFF do
+          Write(Char($3BC), Char($B5), Char($C2B5));
+    ReadLn;
+    exit;
+
 
     SetPriorityClass (GetCurrentProcess, REALTIME_PRIORITY_CLASS);
 

@@ -9,10 +9,10 @@ uses
   Misc, DateTimeTools, IdUDPBase, IdUDPClient, IdSNTPX, IniFiles, Math, IdBaseComponent, IdComponent, IdContext, IdCustomTCPServer, IdTCPServer, IdCmdTCPServer, IdNNTPServer;
 
 const
-  ONE_HOUR    = 1.0 / 24; // 1/24
-  ONE_MINUTE  = ONE_HOUR / 60;
-  ONE_SECOND  = ONE_MINUTE / 60;
-  ONE_MSEC    = ONE_SECOND / 1000.0;
+  // ONE_HOUR    = 1.0 / 24; // 1/24
+  // ONE_MINUTE  = ONE_HOUR / 60;
+  // ONE_SECOND  = ONE_MINUTE / 60;
+  // ONE_MSEC    = ONE_SECOND / 1000.0;
   MSEC_IN_MIN    = 60000.0;
   MSEC_IN_HOUR   = MSEC_IN_MIN * 60.0;
 
@@ -227,7 +227,7 @@ type
     procedure   CheckCompleteSync (tout: DWORD);
     procedure   OnSyncStat(const ip: String; port: WORD; ot, dt: TDateTime);
     procedure   UpServer;
-    procedure   UpdateSTA (bMsg: Boolean);
+    function    UpdateSTA (bMsg: Boolean): Boolean;
     procedure   DoAsyncTimeCheck;
     procedure   CollectCPUStat;
     function    AutoQueryRate(value: Double): Integer;
@@ -280,9 +280,14 @@ begin
 end; // PrecLevel
 
 
-function LocalTime: TSystemTime;
+function LocalTime: TSystemTime; inline;
 begin
  GetLocalTime (result);
+end;
+
+function LocalDateTime: TDateTime; inline;
+begin
+ result := SystemTimeToDateTime(LocalTime);
 end;
 
 procedure ServiceController(CtrlCode: DWord); stdcall;
@@ -328,12 +333,9 @@ begin
  pfc_ntp_dev := TDataStatVector.Create ( 4 );
  clk_ntp_dev := TDataStatVector.Create ( 4 );
  clk_pfc_dev := TDataStatVector.Create ( 4 );
-
-
  StartLogging('');
  LoadConfig;
  ODS( CFormat('[~d ~T]. #DBG: LocalTime service initializing. Version: %s, ServiceObject at: $%p ', '~C07', [GetFileVersionStr (''), Pointer(self)]) );
-
 
  {s := '#TEST_UNICODE: ';
  for n := $A0 to $FF do
@@ -346,35 +348,21 @@ begin
  scl.AddCPUCounters ('% Processor Time');
 
  pt := TProfileTimer.Create;
+ g_timer.TestPrecision (5000);
+ pt.UpdateCalibration(TRUE);
  pt.Start ($FFFFFFFF);
  pt.PFCRatio := ( MSEC_IN_HOUR + pfc_adjust ) / MSEC_IN_HOUR;
  g_timer.DiffTimer.PFCRatio := pt.PFCRatio;
-
  with g_timer.ActiveSlot^ do
   begin
     pfc_corr := pt.PFCRatio;
     ODS('[~d ~T]. #DBG: VirtualTimeData structure size = ' + IntToStr ( sizeof (TVirtualTimerData) ) );
    end;
-
-
  Assert ( Abs (pt.PFCRatio - 1) < 0.1, ftow ( pt.PFCRatio, 'Dangerous PFCRatio value = %.3f ' ) );
-
- pt.UpdateCalibration ( TRUE );
-
  sorter := TList.Create;
-
-
-
  Sleep (100);
-
  elp := pt.Elapsed (1);
-
-
  Assert ( elp < 1000, Format ( 'Dangerous result for PFC-timer = %f, ratio = %.8f, coef = %.9f, adj_coef = %.9f ', [ elp, pt.PFCRatio, pt.Coef, pt.AdjustedCoef ] ) );
-
-
-
-
  ODS ('[~d ~T]. #DBG: PFCRatio = ~C0D' + FormatFloat('0.00000###', pt.PFCRatio) + '~C07');
  ref_time := Now;
  pt.StartOne (VTT_TIMER, $F); // initial
@@ -387,6 +375,8 @@ begin
  pwm_side := 0;
 
  have_cpu_stat := ( scl.CollectQueryData (5) = ERROR_SUCCESS );
+
+
 
  if not g_timer.OwnRights then
     PrintError ('VirtualTimer has no owner rights for shared section');
@@ -405,6 +395,7 @@ begin
     g_timer.ActiveSlot.clock_res := target_res;
 
  g_timer.ActiveSlot.Hash;
+
  // prv_ntp_time := Now;
  // TODO: check other copies TMService in memory
 end; // Create
@@ -437,14 +428,12 @@ var
     tmr: Integer;
     rft: TDateTime;
    elps: Double;
-   s: String;
 begin
  // дл€ основного таймера, надо выбрать 3
  tmr := IfV ( main, VTT_TIMER, VTT_TIMER2);
  rft := IfV ( main, ref_time, ref_time2);
-
- elps := pt.Elapsed (tmr);
- result := rft + elps * ONE_MSEC;
+ elps   := pt.Elapsed (tmr);
+ result := rft + elps * DT_ONE_MSEC;
 end; // GetPFCTime
 
 function TsvcTime.GetServiceController: TServiceController;
@@ -534,6 +523,7 @@ begin
   else
      min_date := Trunc (Now);
 
+  SetPriorityClass ( GetCurrentProcess(), fini.ReadInteger('config', 'ProcessPriority', ABOVE_NORMAL_PRIORITY_CLASS));
   min_dvg := fini.ReadInteger ('bounds', 'min_dvg', 0);
   max_dvg := fini.ReadInteger ('bounds', 'max_dvg', 1800 * 1000);
   max_rqt := fini.ReadInteger ('bounds', 'max_rqt', 1000);
@@ -625,7 +615,7 @@ begin
  if ( ref_time > 0 ) and ( ref_time < Now ) and ( elps > 10000 ) then
    begin
     ODS('[~d ~T]. #DBG: Last time synchronization...');
-    IndySetLocalTime (  ref_time + elps * ONE_MSEC );
+    IndySetLocalTime (  ref_time + elps * DT_ONE_MSEC );
    end;
  logs.Clear;
 end;
@@ -1024,7 +1014,7 @@ begin
 
  if sfx then
   begin
-   dt := Frac ( f * ONE_MSEC );
+   dt := Frac ( f * DT_ONE_MSEC );
    st := FormatDateTime ('hh:nn:ss', dt);
    if ( Abs (f) >= MSEC_IN_DAY ) then
      result := IfV(col, '~CCF', '') + IfV(f > 0, '+', '-') + ftow ( Trunc (f / MSEC_IN_DAY), '%.0f days ') + st + ' '
@@ -1036,9 +1026,9 @@ begin
      result := IfV(col, '~C0E', '') + FormatFloat('0.0000', f / 1000.0) + ' sec'
    else
    if Abs (f) < 10.0 then
-     result := IfV(col, '~C0A', '') + FormatFloat('0', f * 1000.0) + ' mcs'
+     result := IfV(col, '~C0A', '') + FormatFloat('0', f * 1000.0) + ' µs'
    else
-     result := IfV(col, '~C0A', '') + FormatFloat('0.00', f) + ' mls'
+     result := IfV(col, '~C0A', '') + FormatFloat('0.00', f) + ' ms'
 
   end;
 
@@ -1052,7 +1042,7 @@ begin
 
  if col then
    begin
-    result := AnsiReplaceStr (result, ' mcs', ' ~C0Fmcs');
+    result := AnsiReplaceStr (result, ' µs', ' ~C0Fµs');
     result := result + cc;
    end;
 end;
@@ -1069,7 +1059,7 @@ var
    ct, dt, clock_div, dvg_sum: TDateTime;
    dvg_rec, ref_rec: PDVGREC;
    dvg_lst: array [0..15] of TDVGREC;
-   s, tt, dbg: String;
+   s, msg, tt, dbg: String;
    rqt: Double;
     st: TSystemTime;
 
@@ -1134,7 +1124,7 @@ begin
      ct := GetPFCTime ( TRUE );
 
 
-     DateTimeToSystemTime ( ct + 2 * ONE_MSEC, st );
+     DateTimeToSystemTime ( ct + 2 * DT_ONE_MSEC, st );
      dt := SystemTimeToDateTime ( st ); // округленно до мс.
      // подгонка к мс
      repeat
@@ -1166,7 +1156,7 @@ begin
 
 
 
-    ct := ct + ( rqt * ONE_MSEC ); // precision time with delay
+    ct := ct + ( rqt * DT_ONE_MSEC ); // precision time with delay
 
     if dt = 0 then
       begin
@@ -1220,12 +1210,19 @@ begin
     else
        tt := TimeToStrMS ( dt, 6 );
 
-    ODS('[~d ~TL]. #MSG: NTPS ~C0E[' + s + ']~C07 ret ~C0A { ' +
-                  FormatDateTime ('dd mmm yyyy ', dt) + tt + ' }~C07, diver. = ' +
-                  FmtDelay (clock_div / ONE_MSEC, 7, 'cs') + ', RTD = ' +
-                  FmtDelay (IdSNTP1.RoundTripDelay / ONE_MSEC, 7, 'cs') + ', AJT = ' +
-                  FmtDelay (IdSNTP1.AdjustmentTime / ONE_MSEC, 7, 'cs') + ', RQT = ' +
-                  FmtDelay (rqt, 7, 'cs') + ', STR =~C0D ' + IntToStr (IdSNTP1.Stratum) + '~C07');
+     msg := Format('~C0F[~d ~TL]. #NTP(%d): NTPS ~C0E%s]~C07 ret ~C0A { %s }~C07, diver. = %s,' +
+                  'RTD = %s, AJT = %s, RQT = %s, STR =~C0D %d ',
+                  [i, s,
+                  FormatDateTime ('dd mmm yyyy ', dt) + tt,
+                  FmtDelay (clock_div / DT_ONE_MSEC, 7, 'cs'),
+                  FmtDelay (IdSNTP1.RoundTripDelay / DT_ONE_MSEC, 7, 'cs'),
+                  FmtDelay (IdSNTP1.AdjustmentTime / DT_ONE_MSEC, 7, 'cs') ,
+                  FmtDelay (rqt, 7, 'cs'),
+                  IdSNTP1.Stratum]);
+
+     if (i and 1 = 0) then
+        msg := AnsiReplaceStr(msg, '~C0', '~C8');
+     ODS(msg + '~C07');
 
     // Sleep( 1 );
    end;
@@ -1254,7 +1251,7 @@ begin
     if i = n then continue;
     dvg_rec := sorter [n];
     ref_rec := sorter [i];
-    dt := Sqr( dvg_rec.dvg / ONE_MSEC - ref_rec.dvg / ONE_MSEC );
+    dt := Sqr( dvg_rec.dvg / DT_ONE_MSEC - ref_rec.dvg / DT_ONE_MSEC );
     dvg_rec.disp := dvg_rec.disp + dt;
    end;
 
@@ -1291,7 +1288,7 @@ begin
  for n := 0 to i do
   begin
    dvg_rec := sorter [n];
-   s := s + FmtDelay ( dvg_rec.dvg / ONE_MSEC ) + ':' + FormatFloat('0.000 ', dvg_rec.weight);
+   s := s + FmtDelay ( dvg_rec.dvg / DT_ONE_MSEC ) + ':' + FormatFloat('0.000 ', dvg_rec.weight);
    dvg_sum := dvg_sum + dvg_rec.weight *  dvg_rec.dvg;
    Inc (ccnt);
   end;
@@ -1308,18 +1305,22 @@ begin
    end;
 
  ODS ('[~d ~T]. #DBG(' + IntToStr(n_ticks) + '): Stricted dvg:weight list =~C0A { ' + s + ' }~C07, ntp_diver = ~C0D' +
-       FmtDelay ( result / ONE_MSEC ) + '~C07, max_error = ~C0D' + FmtDelay ( ntp_disp / ONE_MSEC ) + '~C07');
+       FmtDelay ( result / DT_ONE_MSEC ) + '~C07, max_error = ~C0D' + FmtDelay ( ntp_disp / DT_ONE_MSEC ) + '~C07');
 end; // QueryNTPPool
 
 
 function TsvcTime.CompareVirtualTimer(idt: Integer): TDateTime;
 var
    ct, dt: TDateTime;
+   r1, r2: TDateTime;
 begin
  TickAdjust (2);
  ct := CurrentDateTime;
  dt := GetPFCTime( TRUE );
- result := (dt - ct);
+ r1     := ( dt - ct );
+ result := ( dt - LocalDateTime );
+ if Abs(r1) > Abs(result) then
+    result := r1;
 end;
 
 function TsvcTime.AutoQueryRate (value: Double): Integer;
@@ -1354,43 +1355,52 @@ var
    deviation, dt, pfc_period,
     diver_ms, diver_per_hr,
     ntp_period: Double;
+     real_time: TDateTime;
       pfc_time: TDateTime;
       ntp_time: TDateTime;
+        g_diff: TDateTime;
+       g_ratio: Double;
+       t_ratio: Double;
          afact: Double;
           fini: TIniFile;
           slot: TVirtualTimerRecord;
+         ticks: TPFCValue;
+
              i: Integer;
-begin
-  diver_ms := ntp_dv / ONE_MSEC;
+begin // ntp_dv == расхождение серверного и опорного периода в сутках
+  diver_ms := ntp_dv / DT_ONE_MSEC;
   Sleep (1); // чтобы был квантик
-
   afact := g_timer.ActiveSlot.aprox_pfc;
-
-
+  // pt.UpdateCalibration(TRUE); // пересчет AdjustedCoef исход€ из частоты
+  // TickAdjust(2);
+  ticks      := pt.GetTimeStamp - pt.TimerStarted(VTT_TIMER);
   pfc_period := pt.Elapsed ( VTT_TIMER );
-  pfc_time  :=  GetPFCTime ( TRUE ); // CalcVT (ref_time, pfc_period);
+  pfc_time   :=  GetPFCTime ( TRUE ); // ref_time + pfc_period
 
 
-  ntp_time := pfc_time + ntp_dv;
-
+  pt.StartOne (VTT_TIMER, $F);       // MAIN SYNC.1
+  ntp_time   := pfc_time + ntp_dv;    // используетс€ просто задержка опорного времени от серверного
 
   // замер€етс€ точное врем€ = системное врем€ - ошибка системного времени (апрокс.), и включаетс€ отсчет точным таймером
+  wprintf('[~d ~T].~C0E #PFC_DBG:~C07 ticks elapsed =~C0D %d~C07, AdjustedCoef =~C0D %.11f~C07',
+                  [ticks, pt.AdjustedCoef]);
 
   ODS ( CFormat ('[~d ~T].~C0F #PROF(sync): ref_time = %s, pfc_time = %s, ntp_time = %s ~C07', '~C0F',
                      [TimeToStrMS ( ref_time, 6 ), TimeToStrMS ( pfc_time, 6 ), TimeToStrMS ( ntp_time, 6 ) ] ) );
 
-  pt.StartOne (VTT_TIMER, $F);   // MAIN SYNC
-  ref_time := ntp_time;
+  ref_time := ntp_time; // MAIN SYNC.2
+  if prv_ntp_time > 0 then
+     ntp_period := (ntp_time - prv_ntp_time) / DT_ONE_MSEC // оценка времени от предыдущего запроса в мс.
+  else
+     ntp_period := pfc_period;
 
+  // ntp_period    := pfc_period + diver_ms;
+  t_ratio := ntp_period / pfc_period * pt.PFCRatio;  // целевой коэффициент PFCRatio
 
   // ratio := 0;
-
-  if ( prv_ntp_time <= 0 ) then // 1st loop
-       prv_ntp_time := ntp_time;
-
-
-  ntp_period := (ntp_time - prv_ntp_time) / ONE_MSEC; // оценка времени от предыдущего запроса в мс.
   prv_ntp_time := ntp_time;
+
+  if ntp_period < 10 then exit;
 
   // рассчет реалистичного значени€ коэффициента PFC, через значени€ NTP ответов
 
@@ -1400,9 +1410,8 @@ begin
      deviation := diver_ms;
 
 
-  dt := MSEC_IN_HOUR *  deviation / ntp_period; // первод в формат "расхождение в час"
-
-  diver_per_hr := MSEC_IN_HOUR * diver_ms / ntp_period;
+  dt           := MSEC_IN_HOUR * deviation / ntp_period; // первод в формат "расхождение в час"
+  diver_per_hr := MSEC_IN_HOUR * diver_ms  / ntp_period;
 
   if ( Abs (dt) > 500 ) or ( pfc_period < 20000 ) then
       begin
@@ -1415,14 +1424,16 @@ begin
   //  if Abs (dt) > 10 * MSEC_IN_MIN  then exit; // какое-то несусветное расхождение однако (10 min)
 
 
-  ODS( Format('[~d ~T]. #PROF:~C0E DIFF~C0F ( NTP period (%s~C0F ) - PFC period (%s~C0F ) )~C07 = %s (~C0F%.2f~C07 ms/h), ' +
+  ODS( Format('[~d ~T]. #PROF:~C0E DIFF~C0F ( NTP period (%s~C0F ) - PFC period (%s~C0F ) )~C07 = %s (~C0F%.4f~C07 %%), ' +
               ' diver/h =~C0F %.2f~C07 ms, PFCAdjust(' +
-                 pfc_adjust_lv + ') =~C0D %.4f~C07',
+                 pfc_adjust_lv + ') =~C0D %.4f~C07, PFCRatio = ~C0D %.7f~C07 ',
             [FmtDelay (ntp_period, 7, 'sc'),
              FmtDelay (pfc_period, 7, 'sc'),
              FmtDelay (deviation, 7, 'sc'),  // расхождение за период
-             dt, diver_per_hr,
-             pfc_adjust]) +
+             100 * deviation / ntp_period,
+             diver_per_hr,
+             pfc_adjust,
+             pt.PFCRatio]) +
                 ' VTT~C0E ' + IfV (pfc_period < ntp_period, 'slower', 'faster') + '~C07 than NTP source' );
 
 
@@ -1431,64 +1442,88 @@ begin
 
   if g_timer.OwnRights then
    begin
-    slot := g_timer.ActiveSlot^;
-    slot.pfc_dvg := dt; // расхождение периодов
-    g_timer.Update ( slot );
-   end;
+    diver_ms  := g_timer.DiffTimer.Elapsed(1);
+    real_time := pfc_time + pt.Elapsed(VTT_TIMER) * DT_ONE_MSEC; // идеально точное врем€ на сейчас
+    // GetTime использует (pfc_current - active_slot.pfc_base) со всеми коэффициентами
+    g_diff    := g_timer.GetTime(TRUE) - real_time;
+    g_diff    := g_diff / DT_ONE_MSEC;
 
-  pfc_ntp_dev.Add ( dt );
+    if ( Abs (g_diff) >= 1 ) then
+      begin
+       g_ratio  := g_timer.DiffTimer.PFCRatio;
 
-  // пока статистика не накоплена, надо пропускать...
+       if Abs(g_diff) > 1000 then // слишком большое расхождение
+          g_timer.SyncWith ( pt, VTT_TIMER, ref_time );
+
+       slot      := g_timer.ActiveSlot^;
+       // slot.base     := real_time;
+       // slot.pfc_coef := pt.Coef;
+       // slot.pfc_base := g_timer.DiffTimer.GetTimeStamp;
+       if  (pfc_period > 20000) then
+         begin
+           // за следующий период желательно сократить разницу в 2 раза, необходимо повысить/понизить скорость
+           // разница добавл€етс€ с запасом в %
+           deviation := (pt.PFCRatio - g_ratio) * 1.01 ; // положительно, при условии большей скорости опорного
+           if (g_diff > 0) then
+               // при спешке ведомого таймера, лучше использовать минимальную скорость из возможных
+               g_ratio := Min (g_ratio, g_ratio + deviation - 0.000001)
+           else // при отставании ведомого, соответственно наоборот
+               g_ratio := Max (g_ratio, g_ratio + deviation + 0.000001);
+
+           wprintf('[~d ~T].~C0C #WARN:~C07 g_timer not sync, hurry diff = %.1f ms, elapsed from last = %.1f ms,'
+                 + ' ratio =~C0D %.11f~C07, bearing ratio =~C0D %.11f~C07, used diff = ~C0D %.11f~C07'  ,
+                 [g_diff, diver_ms, g_ratio, pt.PFCRatio, deviation]);
 
 
-  if ( pfc_ntp_dev.Count < pfc_ntp_dev.Size ) then
-     begin
-      pt.StartOne (VTT_PERIOD, $F);
-      exit; // pfc_ntp_dev.Size
-     end;
+           g_timer.DiffTimer.PFCRatio := g_ratio;
+           slot.pfc_corr := g_ratio;
+           // g_timer.DiffTimer.StartOne(1);
+           g_timer.Update ( slot );
+         end;
+       g_timer.DiffTimer.StartOne(1);
+      end;
+    slot.pfc_dvg := dt; // расхождение периодов, статистическое значение и только
+   end
+  else
+   ODS('[~T].~C0C #WARN:~C07 g_timer.OwnRights = false ');
 
-
-  // статистически высчитанна€ погрешность виртуального таймера
-  dt := pfc_ntp_dev.StatMedian;
-  // dt := dt / ONE_MSEC;                 // превратить в миллисекунды
-
-  if pfc_period < 10000 then dt := Sign (dt) * 1; // micro-change
-
-
-  ODS( ftow(dt, '[~d ~T]. #PROF: Median divergence calculated as~C0D %.3f~C07 ms/h ') );
-
-  if Abs ( dt ) < 0.1 then
+  // если скорость расходитс€ 16 мс в час, это погрешность измерений
+  if  ( pfc_period < 20000 ) or ( Abs(diver_per_hr) < 16 ) then
     begin
      pt.StartOne (VTT_PERIOD, $F);
      exit;
     end;
+  pfc_ntp_dev.Add ( dt );
+  // статистически высчитанна€ погрешность виртуального таймера за один час
+  dt := pfc_ntp_dev.StatMedian;
+  // dt := dt / ONE_MSEC;                 // превратить в миллисекунды
+  ODS( ftow(dt, '[~d ~T]. #PROF: Median divergence calculated as~C0D %.3f~C07 ms/h ') );
+  if ( pfc_ntp_dev.Count < pfc_ntp_dev.Size ) then
+      dt := dt * 0.1
+  else
+      dt := dt * afact;
 
-  dt := dt * afact;
+
+
 
   pfc_adjust := pfc_adjust + dt;
-
   pfc_adjust := Min (pfc_adjust, pfca_high);
   pfc_adjust := Max (pfc_adjust, pfca_low);
 
   ODS( Format('~C0F[~d ~T]. #DBG:~C0A pfc_adjust~C0F corrected with value~C0D %.3f~C0F ms/h =~C0D %.1f~C0F ms/h ~C07', [dt, pfc_adjust] ) );
-
   pt.PFCRatio := ( MSEC_IN_HOUR + pfc_adjust ) / MSEC_IN_HOUR;
-  pt.Coef := pt.Coef * 1.0;
-
-  if g_timer.OwnRights then
-     g_timer.SyncWith ( pt, VTT_TIMER, ref_time );
-
-
-  ODS( Format (#9#9'       #DBG: PFCRatio normalized = ~C0D%.11f~C07,  corrected period = %s, ActiveSlot.index =~C0D %d ~C07',
-                          [pt.PFCRatio, FmtDelay ( pt.Elapsed (VTT_PERIOD), 7, 'sc'), g_timer.ActiveSlot.slot_idx ] ) );
+  pt.UpdateCalibration(TRUE);
+  ODS( Format (#9#9'       #DBG: PFCRatio normalized = ~C0D%.11f~C07, target =~C0D %.11f~C07,  corrected period = %s, ActiveSlot.index =~C0D %d ~C07',
+                          [pt.PFCRatio, t_ratio, FmtDelay ( pt.Elapsed (VTT_PERIOD), 7, 'sc'), g_timer.ActiveSlot.slot_idx ] ) );
   pt.StartOne (VTT_PERIOD, $F);  // MAIN SYNC
 
+  i := q_rate;
 
-  if pfc_ntp_dev.Count = pfc_ntp_dev.Size then
+  if (pfc_ntp_dev.Count = pfc_ntp_dev.Size) and (Abs(g_diff) < 1.0) then
+    begin
      pfc_ntp_dev.Clear;
-
-  i := AutoQueryRate ( Abs(dt) );
-
+     i := AutoQueryRate ( Abs(dt) );
+    end;
 
   if i <> q_rate then
     begin
@@ -1563,7 +1598,7 @@ begin
                  ', Local time = ' + FormatDateTime('dd.mm.yyyy hh:nn:ss.zzz', dt ) +
                  ', Abs diver. = ' + FormatFloat ('0.##', dta ) + ' days');
 
-     last_time := last_time + pt.Elapsed * ONE_MSEC;
+     last_time := last_time + pt.Elapsed * DT + DT_ONE_MSEC;
 
      DateTimeToSystemTime (last_time, st);
 
@@ -1614,10 +1649,15 @@ begin
  if ( ( minutes mod q_rate = 0) or (n_ticks <= 5) or ( Abs (ct) >= 10 * min_dvg ) ) and
       ( ref_time <> 0 )  then
      begin
-      ntp_diver := QueryNTPPool;                 // получение расхождени€ времени системного таймера и серверов источников.
+      ntp_diver := QueryNTPPool;                 // получение расхождени€ времени системного(?) таймера и серверов источников.
       if ( ntp_dt = 0 ) or ( ntp_diver = 0 ) then exit;
       ntp_sync := TRUE;
       DateTimeTools.ps_start_time := ntp_dt - pt.Elapsed (PS_LIVE_TIME) - 0.1; // подавление ругани
+      wprintf('~C0B[~d ~T]. #DBG(ntp/sys):~C07 ntp_time = %s, precise = %s, local = %s ',
+                [FormatDateTime('hh:nn:ss.zzz', ntp_dt + pt.Elapsed(2) * DT_ONE_MSEC) ,
+                 FormatDateTime('hh:nn:ss.zzz', PreciseTime),
+                 FormatDateTime('hh:nn:ss.zzz', LocalDateTime)]);
+
 
       // clk_ntp_dev.Add (ntp_dev);
 
@@ -1639,7 +1679,7 @@ begin
 
 
  /// =================================== —»Ќ’–ќЌ»«ј÷»я ¬»–“”јЋ№Ќќ√ќ “ј…ћ≈–ј — —≈“≈¬џћ ¬–≈ћ≈Ќ≈ћ =========================
- if ntp_sync and ( Abs (ntp_diver / ONE_MSEC ) > 0.01 ) then
+ if ntp_sync and ( Abs (ntp_diver / DT_ONE_MSEC) > 0.01 ) then
   begin
    // ======================================== јвтоподстройка виртуального таймера =================================================== //
    AdjustPFCTimerSpeed ( ntp_diver );
@@ -1648,8 +1688,8 @@ begin
    // sys_pfc_dev.Clear;  // чтобы статистика не сбивалась
 
    if rsync_cnt > 2 then
-      SaveToLog ( stats_file, InfoFmt ('~D ~t;') + FormatFloat('0.00', ntp_diver / ONE_MSEC) + ';' + FormatFloat('0.00', ct / ONE_MSEC) + ';' +
-                  FormatFloat('0.0', (ntp_diver + cum_dvg) / ONE_MSEC) + ';' +
+      SaveToLog ( stats_file, InfoFmt ('~D ~t;') + FormatFloat('0.00', ntp_diver / DT_ONE_MSEC) + ';' + FormatFloat('0.00', ct / DT_ONE_MSEC) + ';' +
+                  FormatFloat('0.0', (ntp_diver + cum_dvg) / DT_ONE_MSEC) + ';' +
                   FormatFloat('0.0', pfc_ntp_dev.Last) + ';' + FormatFloat ('0.0000', pfc_adjust) );
 
    if Assigned (IdSNTPSrv) then
@@ -1671,8 +1711,8 @@ begin
        begin
         ct := drift_ema;
         if (drift_l < drift_h) and (drift_l <> 0) then
-          ODS( Format ('~C09[~d ~T]. #DBG: VTT drift stat, low =~C0F %s~C09, high =~C0F %s~C07',
-                      [ FmtDelay (drift_l / DT_ONE_MSEC), FmtDelay(drift_h / DT_ONE_MSEC)] ) );
+          wprintf ('~C09[~d ~T]. #DBG:~C07 VTT drift stat, low = %s, high = %s',
+                      [ FmtDelay (drift_l / DT_ONE_MSEC), FmtDelay(drift_h / DT_ONE_MSEC)] );
 
         drift_l := ct;
         drift_h := ct;
@@ -1707,7 +1747,9 @@ begin
 
 
  stab_cross := FALSE;
- dta_ms := dta / ONE_MSEC;
+ dta_ms := dta / DT_ONE_MSEC;
+ wprintf('[~d ~T]. #DBG: system clock <-> PF clock diff = %.1f ms', [dta_ms]);
+
  abs_ms := Abs (dta_ms);
 
  if (prv_dta_ms <> 0) then
@@ -1719,7 +1761,7 @@ begin
  last_sync_elps := pt.Elapsed (VTT_LAST_SYNC);
  last_chk_elps := pt.Elapsed (VTT_LAST_CHECK);
 
- sync_expected := (n_ticks <= 4) or (( Abs (dta) >= min_dvg * ONE_MSEC) and ( Abs(dta) <= max_dvg * ONE_MSEC));
+ sync_expected := (n_ticks <= 4) or (( Abs (dta) >= min_dvg * DT_ONE_MSEC) and ( Abs(dta) <= max_dvg * DT_ONE_MSEC));
 
  // ========================= ћя√ јя —»Ќ’–ќЌ»«ј÷»я: ѕќƒ√ќЌ ј — ќ–ќ—“» —»—“≈ћЌќ√ќ “јйћ≈–ј к ¬»–“”јЋ№Ќќћ” ==============================
  // Ётот подход используетс€ при отсутствии необходимости синхронизировать большую разницу.
@@ -1735,6 +1777,10 @@ begin
        slot := g_timer.ActiveSlot^;
        slot.clock_dvg := calct; // расхождение периодов
        g_timer.Update ( slot );
+      end
+    else
+      begin
+       ODS('[~T].~C0C #WARN:~C07 not have rights for g_timer');
       end;
 
     // calct := sys_pfc_dev.Last;
@@ -1890,14 +1936,14 @@ begin
      s := '-------------------------------------------------------------------------------------------------------------------------'#13#10;
      s := s + '[~d ~T].~C0F #MSG(Sync): Synсhronizing clocks with ~C0E PFC timer' +
               '~C0F, correcting delta(sec) ' + IfV (dta > 0, '~C0A', '~C0C') +
-               FormatFloat('0.###', dta / ONE_SECOND) + '~C0F';
+               FormatFloat('0.###', dta / DT_ONE_SECOND) + '~C0F';
 
 
      if ( last_sync_elps >= 50000 ) and ( ema_delta <> 0 ) then
       begin
 
        cum_dvg := cum_dvg + dta;
-       calct := cum_dvg / ONE_SECOND;
+       calct := cum_dvg / DT_ONE_SECOND;
 
        ct := (MSEC_IN_HOUR / last_sync_elps);
        add := ema_delta *  ct * 0.75;
@@ -1905,7 +1951,7 @@ begin
        dta := dta * aprox_fact; // применить коэффициент приближени€
 
        //
-       s := s + ', with value ' + IfV (dta > 0, '~C0A', '~C0C') + FormatFloat('0.###', dta / ONE_SECOND) + '~C0F';
+       s := s + ', with value ' + IfV (dta > 0, '~C0A', '~C0C') + FormatFloat('0.###', dta / DT_ONE_SECOND) + '~C0F';
        s := s + ', cumulative delta(sec) ' + IfV (calct > 0, '~C0A', '~C0C') + FormatFloat('0.###', calct) + ' ~C0F';
 
        s := s + #13#10#9#9'       ~C0E#DBG(Sync): ema_delta =~C0D ' + ftow(ema_delta, '%.5f') +
@@ -1952,13 +1998,13 @@ begin
       last_sync_elps := pt.Elapsed (VTT_LAST_SYNC);
       ct := last_sync_elps / 1000;   // сколько прошло с последней синхронизации
       if ct <= 500 then exit;
-      ctc := dta / ONE_MSEC;         // расхождение в мсек
+      ctc := dta / DT_ONE_MSEC;         // расхождение в мсек
       calct := ( ctc /  ct * 3600.0 ); // дельта в час  { 200 / 60 * 3600  }
 
       ODS( CFormat ('[~d ~T]. #DBG: Sync delta %s, is outbound settings %.1f - %.1f, from last sync elapsed = %s, stable dev = %7.1f ms/h',
           '~C07', [FmtDelay (ctc), min_dvg, max_dvg, FmtDelay(last_sync_elps), calct]) );
 
-      ct := ntp_diver / ONE_MSEC;
+      ct := ntp_diver / DT_ONE_MSEC;
       s := InfoFmt('~D ~T;', g_timer.GetTime) + Format('%.3f;%.3f;%d;%d;', [ctc, ct, st_adjust, pwm_split] );
       SaveToLog(nosync_log, s);
        // calct := dta_ms / last_sync_elps * 3600 * 1000; // расхождение за час оценочное
@@ -1967,7 +2013,7 @@ begin
 end;
 
 
-procedure TsvcTime.UpdateSTA;
+function TsvcTime.UpdateSTA;
 var
    ucnt: Int64;
    lcnt, tinc: DWORD;
@@ -1984,12 +2030,12 @@ var
 
 begin
  lcnt := 0;
+ result := FALSE;
  if ( not have_privileges ) then
       have_privileges := AdjustPrivileges (hTok);
 
- if ( not have_privileges ) then exit;
-
-
+ if ( not have_privileges ) then
+      exit;
  SetTimerResolution ( 0, FALSE, act );
 
  if ( clock_res > 0 ) and ( act <> target_res ) then
@@ -1999,8 +2045,6 @@ begin
    end;
 
  // res := FALSE;
-
-
 
  try
    GetSystemTimeAdjustment (lcnt, tinc, tad);
@@ -2026,13 +2070,7 @@ begin
 
    // получить, сколько 100-нс единиц добавл€етс€ каждый к системному времени тик(sic!);
    ucnt := Round (tick_size * 10000.0);
-
-
-
    if ucnt <= 0 then exit;
-
-
-
    if ucnt <> lcnt then
     begin
      TickAdjust(2);
@@ -2041,10 +2079,11 @@ begin
 
      Sleep(300);
      TickAdjust(2);
-     res :=  SetSystemTimeAdjustment ( DWORD(ucnt), FALSE ); // 10 = 1 mcs, = 0.001
-     rv := IfV (res, ' success', '~C0C failed ~C0F' + Err2Str (GetLastError) );
-     if res then
+     result :=  SetSystemTimeAdjustment ( DWORD(ucnt), FALSE ); // 10 = 1 mcs, = 0.001
+     rv := IfV (result, ' success', '~C0C failed ~C0F' + Err2Str (GetLastError) );
+     if result then
        begin
+
         Inc (st_adjust_cnt);
         if g_timer.OwnRights then
           begin
@@ -2062,8 +2101,11 @@ begin
                     tinc, st_dev, avg_cpu_load, pwm_side, st_adjust_cnt, rv]));
     end
    else
-    if bMsg then
+    begin
+      if bMsg then
        ODS( CFormat('[~d ~T]. #DBG: Clock adjustment value is equal previous (%d), sta/h = %d', '~C07', [lcnt, st_adjust]) );
+     result := TRUE;
+    end;
  except
   on E: Exception do
      PrintError ('Exception catched in UpdateSTA: ' + E.Message);
