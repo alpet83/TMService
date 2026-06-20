@@ -1,5 +1,4 @@
 object svcTime: TsvcTime
-  OldCreateOrder = False
   OnCreate = ServiceCreate
   DisplayName = 'LocalTimeSync service'
   Interactive = True

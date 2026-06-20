@@ -1,0 +1,4 @@
+# Auto detect text files and perform CRLF normalization
+*.md   text auto, eol=lf
+src/*.pas  text auto, eol=crlf
+src/*.dpr  text auto, eol=crlf
