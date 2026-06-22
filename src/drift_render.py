@@ -2,6 +2,7 @@
 """
 drift_render.py -- visualization of TMService JSONL drift log
 Usage: python drift_render.py <drift.jsonl> [-o drift_stats.svg] [--limit-pts N]
+       [--width PX] [--height PX]
 """
 
 import sys
@@ -42,6 +43,10 @@ def main():
                         help='Output SVG path (default: drift_stats.svg next to input)')
     parser.add_argument('--limit-pts', type=int, default=1440, metavar='N',
                         help='Show only last N points (default: 1440 = one day)')
+    parser.add_argument('--width',  type=int, default=1728, metavar='PX',
+                        help='Canvas width in pixels (default: 1728)')
+    parser.add_argument('--height', type=int, default=576,  metavar='PX',
+                        help='Canvas height in pixels (default: 576)')
     args = parser.parse_args()
 
     try:
@@ -70,7 +75,7 @@ def main():
 
     times     = []
     dta_ms    = []
-    drift_msh = []
+    drift_msh = []  # stored as ms/min (= drift_msh_raw / 60)
     st_adj    = []
     is_ntp    = []
     cpu_load  = []
@@ -86,7 +91,7 @@ def main():
                 continue
         times.append(ts)
         dta_ms.append(r.get('dta_ms', 0.0))
-        drift_msh.append(r.get('drift_msh', 0.0))
+        drift_msh.append(r.get('drift_msh', 0.0) / 60.0)  # convert ms/h -> ms/min
         st_adj.append(r.get('st_adjust', 0))
         is_ntp.append(bool(r.get('ntp_sync', False)))
         cpu_load.append(r.get('cpu_load', None))
@@ -128,7 +133,8 @@ def main():
     C_SPINE  = '#333355'
     C_STATS  = '#8899aa'
 
-    fig, ax1 = plt.subplots(figsize=(18, 6), dpi=96)
+    dpi = 96
+    fig, ax1 = plt.subplots(figsize=(args.width / dpi, args.height / dpi), dpi=dpi)
     fig.patch.set_facecolor(BG_OUTER)
     ax1.set_facecolor(BG_INNER)
     ax2 = ax1.twinx()
@@ -145,9 +151,9 @@ def main():
         ax1.plot(ntp_t, ntp_v, color=C_PFC, linewidth=1.2, alpha=0.8,
                  label='ntp_ms   PFC vs NTP (ms)', zorder=4)
     ax1.plot(times, drift_msh, color=C_RATE, linewidth=0.8,
-             linestyle='--', alpha=0.6, label='drift_msh (ms/h)', zorder=3)
+             linestyle='--', alpha=0.6, label='drift_msm (ms/min)', zorder=3)
     ax1.axhline(0, color='#ffffff', linewidth=0.4, linestyle=':', alpha=0.25, zorder=1)
-    ax1.set_ylabel('Offset (ms) / Drift rate (ms/h)', color=C_TEXT, fontsize=10)
+    ax1.set_ylabel('Offset (ms) / Drift rate (ms/min)', color=C_TEXT, fontsize=10)
     ax1.tick_params(axis='y', labelcolor=C_TEXT, colors=C_TEXT)
     ax1.tick_params(axis='x', labelcolor=C_TEXT, colors=C_TEXT)
 

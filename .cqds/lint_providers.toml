@@ -1,0 +1,5 @@
+[provider.dcc32]
+kind       = "command"
+argv       = ["cmd", "/c", "P:\\Projects\\TMService\\dcc_build.bat"]
+expect_exit = 0
+timeout_sec = 120

@@ -4,7 +4,7 @@ interface
 
 {.$D-}
 uses
-  Forms, Windows, Messages, SysUtils, StrUtils, Classes, Graphics, Controls, Perf, SyncObjs, ContNrs, TMSGlobals,
+  Forms, WinAPI.Windows, Messages, SysUtils, StrUtils, Classes, Graphics, Controls, Perf, SyncObjs, ContNrs, TMSGlobals,
   SvcMgr, Dialogs, ExtCtrls, IdTCPConnection, IdTCPClient, IdExplicitTLSClientServerBase, IdMessageClient, IdNNTP, IdGlobalProtocols, StrClasses,
   Misc, DateTimeTools, IdUDPBase, IdUDPClient, IdSNTPX, IniFiles, Math, IdBaseComponent, IdComponent, IdContext, IdCustomTCPServer, IdTCPServer, IdCmdTCPServer, IdNNTPServer;
 
@@ -132,7 +132,8 @@ type
     timer_loops: Integer;
       no_dialog: Boolean;
 
-    q_rate, min_qrate, max_qrate: Integer;
+     q_rate, min_qrate, max_qrate: Integer;
+     ntp_poll_cnt: Integer;           // polls since last q_rate eval (low-drift path)
 
     v_rate: Integer;
     ntp_hosts: TStrings;
@@ -143,7 +144,9 @@ type
     cum_dvg: Double;
     sync_cnt: Integer;
     sync_ofs: Integer;           // —мещение в минутах фазы квантовани€
-    ntp_sync_cnt: Integer;
+     ntp_sync_cnt: Integer;
+     ntp_diver:    Double;   // result of last QueryNTPPool (TDateTime units)
+     ntp_sync:     Boolean;  // TRUE if last NTP query resulted in sync
     aprox_fact: Double;
     pfc_save: Boolean;
     pfc_adjust: Double;
@@ -160,9 +163,19 @@ type
     cnt_cpu_load: Integer;
     avg_cpu_load: Double;
     sta_cpu_ratio: Double;
+    prv_sys_idle:   TFileTime; // GetSystemTimes fallback: prev idle time (100ns ticks)
+    prv_sys_kernel: TFileTime; // prev kernel time
+    prv_sys_user:   TFileTime; // prev user time
 
 
     prv_dta_ms: Double;
+
+    // per-tick state (set each CheckTime call, readable by sub-methods)
+    dta_ms:       Double;   // sys<->PFC diff in ms
+    last_chk_elps: Double;  // elapsed since last CheckTime entry (ms)
+    stab_cross:   Boolean;  // True when dta_ms crossed zero this tick
+    sync_expected: Boolean; // True when clock sync should happen this tick
+
 
     pwm_allow: Boolean;
     pwm_range: Integer;
@@ -190,6 +203,8 @@ type
     ref_time, ref_time2: TDateTime;
     ntp_dt, prv_ntp_time: TDateTime;
     ntp_disp: Double;
+    ntp_min_rtt_ms: Double;         // min RTD of selected NTP servers (ms), set by QueryNTPPool
+    ntp_uncertainty_guard: Boolean; // skip NTP sync when |diver| < min_error (NTPUncertaintyGuard)
 
     clock_coef: Double;
 
@@ -225,6 +240,15 @@ type
     ref_dta_ema: Double;         // быстрое EMA сигнала коррекции при малом дрифте
     ref_dta_ema_tc: Integer;     // посто€нна€ времени fast EMA (0/1 = выкл, default 2)
     pfc_trust: Double;           // коэффициент довери€ PFC-таймеру (0..1, default 1.0)
+    prv_ntp_ms:        Double;   // previous NTP offset for sign tracking
+    ntp_sign_streak:   Integer;  // consecutive same-sign NTP count
+    ntp_nuclear_ms:    Double;   // nuclear drift threshold ms (default 15.0)
+    ntp_streak_count:  Integer;  // streak count to allow x0.5 (default 3)
+    ntp_nuclear_floor: Double;   // speed factor in semi-nuclear zone (nuclear_ms..min_dvg), default 0.15
+    ntp_aprox_low_ms:  Double;   // acceptance curve low threshold ms (default 3.0)
+    ntp_aprox_high_ms: Double;   // acceptance curve high threshold ms (= NTPNuclearMs)
+    ntp_aprox_low:     Double;   // factor below low_ms (default 0.25)
+    ntp_aprox_high:    Double;   // factor at high_ms (default 0.9)
     drift_stat: String;
     hPFCMapping : THandle;       // handle shared memory PFC-time for DLL
     pPFCBlock   : Pointer;       // pointer to TPFCSharedBlock
@@ -245,10 +269,20 @@ type
     function    UpdateSTA (bMsg: Boolean): Boolean;
     procedure   DoAsyncTimeCheck;
     procedure   CollectCPUStat;
+    procedure   CollectCPUStatDirect;
     function    AutoQueryRate(value: Double): Integer;
     procedure   AdjustPFCTimerSpeed ( ntp_dv: TDateTime );
     procedure   WriteDriftLog (a_dta_ms, a_calct, a_ntp_ms, a_chk_elps: Double;
                                 a_sync_exp, a_ntp_sync: Boolean);
+     procedure   ReloadConfig;
+     procedure   ResetConsoleSelection;
+     function    NTPAproxFactor(abs_ntp_ms: Double): Double;
+     procedure   InitFirstTick;
+     function    DoNTPQuery(minutes: Integer): Boolean;
+     procedure   SyncPFCWithNTP;
+     function    MeasureVirtualDrift(minutes: Integer; var calct: Double): TDateTime;
+     procedure   ApplyHWAdjust(var calct: Double);
+     procedure   ApplyClockSync(dta: TDateTime; var calct: Double);
 
   protected
     pfc_ntp_dev: TDataStatVector;
@@ -344,7 +378,8 @@ begin
  min_dvg := 0;
  max_dvg := 1800 * 1000;
  auto_qrate := TStrMap.Create (self);
- q_rate := 1;
+  q_rate := 1;
+  ntp_poll_cnt := 0;
  logs := TStrMap.Create (self);
  logs.OwnsObjects := TRUE;
  pfc_ntp_dev := TDataStatVector.Create ( 4 );
@@ -352,7 +387,7 @@ begin
  clk_pfc_dev := TDataStatVector.Create ( 4 );
  StartLogging('');
  LoadConfig;
- ODS( CFormat('[~d ~T]. #DBG: LocalTime service initializing. Version: %s, ServiceObject at: $%p ', '~C07', [GetFileVersionStr (''), Pointer(self)]) );
+ wprintf('[~d ~T]. #DBG: LocalTime service initializing. Version: %s, ServiceObject at: $%p~C07', [GetFileVersionStr(''), Pointer(self)]);
 
  {s := '#TEST_UNICODE: ';
  for n := $A0 to $FF do
@@ -392,7 +427,14 @@ begin
  // pwm_split := pwm_range div 2;
  pwm_side := 0;
 
- have_cpu_stat := ( scl.CollectQueryData (5) = ERROR_SUCCESS );
+ have_cpu_stat := ( scl.CollectQueryData (5) = ERROR_SUCCESS ) and ( scl.Count > 0 );
+ wprintf('[~d ~T]. #DBG: CPU stat init: have_cpu_stat=%s, counters=%d~C07',
+         [IfV(have_cpu_stat, 'TRUE', 'FALSE'), scl.Count]);
+ if not have_cpu_stat then
+  begin
+   GetSystemTimes (prv_sys_idle, prv_sys_kernel, prv_sys_user);
+   wprintf ('[~d ~T]. #DBG: PDH CPU stat unavailable, using GetSystemTimes fallback~C07', []);
+  end;
 
 
 
@@ -536,6 +578,14 @@ begin
   st_adjust_ema_mode   := fini.ReadInteger ('config', 'EmaSpeedMode', 0);
   st_adjust_ema_thr    := fini.ReadFloat   ('config', 'EmaSpeedThr',  0.8);
   pfc_trust            := fini.ReadFloat   ('config', 'PFCTrust',     1.0);
+  ntp_nuclear_ms    := fini.ReadFloat  ('config', 'NTPNuclearMs',    15.0);
+  ntp_streak_count  := fini.ReadInteger('config', 'NTPStreakCount',   3);
+  ntp_nuclear_floor := fini.ReadFloat  ('config', 'NTPNuclearFloor', 0.15);
+  ntp_aprox_low_ms  := fini.ReadFloat  ('config', 'NTPAproxLowMs',   3.0);
+  ntp_aprox_high_ms := fini.ReadFloat  ('config', 'NTPAproxHighMs',  ntp_nuclear_ms);
+  ntp_aprox_low     := fini.ReadFloat  ('config', 'NTPAproxLow',     0.25);
+  ntp_aprox_high    := fini.ReadFloat  ('config', 'NTPAproxHigh',    0.9);
+  ntp_uncertainty_guard := fini.ReadBool('config', 'NTPUncertaintyGuard', True);
 
   s := fini.ReadString ('bounds', 'min_date', '');
 
@@ -551,14 +601,132 @@ begin
   max_dvg := fini.ReadInteger ('bounds', 'max_dvg', 1800 * 1000);
   max_rqt := fini.ReadInteger ('bounds', 'max_rqt', 1000);
 
-  ODS ( CFormat('[~d ~T]. #LOADCFG: NTPQueryRate = %d, VTSyncRate = %d, SyncOffset = %d, AproxFactor = %.4f, AutoPFCAdjust = %s, EnableNTPServer = %s', '~C07',
-                [q_rate, v_rate, sync_ofs, aprox_fact, IfV(auto_pfc_adjust, 'True', 'False'), IfV(enable_srv, 'True', 'False')] ));
+  wprintf('[~d ~T]. #LOADCFG: NTPQueryRate = %d, VTSyncRate = %d, SyncOffset = %d, AproxFactor = %.4f, AutoPFCAdjust = %s, EnableNTPServer = %s~C07',
+          [q_rate, v_rate, sync_ofs, aprox_fact, IfV(auto_pfc_adjust, 'True', 'False'), IfV(enable_srv, 'True', 'False')]);
 
  finally
   fini.Free;
   pp.Free;
  end;
 end;
+
+procedure TsvcTime.ReloadConfig;
+var
+   fini: TIniFile;
+   s, old_hosts: String;
+begin
+  if cfg_file = '' then
+    begin
+      ODS('[~d ~T]. #RELOAD: Config file not found, reload skipped');
+      exit;
+    end;
+  fini := TIniFile.Create(cfg_file);
+  try
+    old_hosts := ntp_hosts.DelimitedText;
+    ntp_hosts.Delimiter := ';';
+    ntp_hosts.DelimitedText := fini.ReadString('config', 'NTPServers', DEF_NTP_HOSTS);
+
+    q_rate    := Max(1, fini.ReadInteger('config', 'NTPQueryRate',  120));
+    min_qrate := Max(1, fini.ReadInteger('config', 'MinQueryRate',  1));
+    max_qrate := Max(1, fini.ReadInteger('config', 'MaxQueryRate',  60 * 24));
+    s := fini.ReadString('config', 'AutoQueryRate', '15@120,50@30,250@15,1000@5,3000@2,10000@1');
+    auto_qrate.CommaText := AnsiReplaceStr(s, '@', '=');
+
+    v_rate  := Max(1, fini.ReadInteger('config', 'VTSyncRate', 1));
+    mcorr   := fini.ReadInteger('config', 'MicroCorr', -20);
+
+    pfc_adjust := fini.ReadFloat('config', 'PFCAdjust',         0);
+    pfc_save   := fini.ReadBool ('config', 'PFCAdjustSave',     FALSE);
+    pfca_low   := fini.ReadFloat('config', 'PFCAdjustLow',      pfc_adjust);
+    pfca_high  := fini.ReadFloat('config', 'PFCAdjustHigh',     pfc_adjust);
+    pfca_tresh := fini.ReadFloat('config', 'PFCAdjustTreshold', 2);
+
+    st_adjust     := fini.ReadInteger('config', 'HWClockAdjust',    0);
+    clock_res     := fini.ReadInteger('config', 'HWClockRes',       0);
+    hw_adjust     := st_adjust <> 0;
+    sta_cpu_ratio := fini.ReadFloat  ('config', 'HWAdjustByCPULoad', 0);
+    pwm_range     := fini.ReadInteger('config', 'PWMRange', 50000);
+    pwm_split     := fini.ReadInteger('config', 'PWMSplit', pwm_range div 2);
+    min_st_adjust := fini.ReadInteger('config', 'MinClockAdjust', st_adjust - 250);
+    max_st_adjust := fini.ReadInteger('config', 'MaxClockAdjust', st_adjust + 250);
+    clock_adjust  := st_adjust <> 0;
+
+    auto_pfc_adjust := fini.ReadBool ('config', 'AutoPFCAdjust', True);
+    aprox_fact      := fini.ReadFloat('config', 'AproxFactor',   0.9);
+
+    sync_timeout := fini.ReadInteger('config', 'SyncTimeout', 25) * 1000;
+    term_timeout := fini.ReadInteger('config', 'TermTimeout',  2) * 1000;
+    check_delay  := fini.ReadInteger('config', 'CheckDelay',  500);
+    enable_srv   := fini.ReadBool   ('config', 'EnableNTPServer', True);
+    enable_sst   := fini.ReadBool   ('config', 'EnableSyncStat',  False);
+    my_stratum   := fini.ReadInteger('config', 'MyStratum', 2);
+    show_cpu_stat := fini.ReadBool  ('config', 'ShowCPUStat', FALSE);
+
+    need_drift_stat    := fini.ReadBool   ('config', 'SaveDriftStat',  False);
+    drift_log_file     := Trim(fini.ReadString('config', 'DriftLogFile', ''));
+    ref_dta_ema_tc     := fini.ReadInteger('config', 'RefDtaEmaTC',   2);
+    st_adjust_ema_mode := fini.ReadInteger('config', 'EmaSpeedMode',  0);
+    st_adjust_ema_thr  := fini.ReadFloat  ('config', 'EmaSpeedThr',  0.8);
+    pfc_trust          := fini.ReadFloat  ('config', 'PFCTrust',      1.0);
+    ntp_nuclear_ms    := fini.ReadFloat  ('config', 'NTPNuclearMs',    15.0);
+    ntp_streak_count  := fini.ReadInteger('config', 'NTPStreakCount',   3);
+    ntp_nuclear_floor := fini.ReadFloat  ('config', 'NTPNuclearFloor', 0.15);
+    ntp_aprox_low_ms  := fini.ReadFloat  ('config', 'NTPAproxLowMs',   3.0);
+    ntp_aprox_high_ms := fini.ReadFloat  ('config', 'NTPAproxHighMs',  ntp_nuclear_ms);
+    ntp_aprox_low     := fini.ReadFloat  ('config', 'NTPAproxLow',     0.25);
+    ntp_aprox_high    := fini.ReadFloat  ('config', 'NTPAproxHigh',    0.9);
+    ntp_uncertainty_guard := fini.ReadBool('config', 'NTPUncertaintyGuard', True);
+
+    if ntp_hosts.DelimitedText <> old_hosts then
+      wprintf('[~d ~T]. #RELOAD:~C0E NTP servers changed: %s~C07', [ntp_hosts.DelimitedText])
+    else
+      ODS('[~d ~T]. #RELOAD: NTP servers unchanged');
+
+    ODS('[~d ~T]. #RELOAD: Config reloaded from ' + cfg_file +
+        CFormat(', NTPQueryRate=%d, VTSyncRate=%d, PFCTrust=%.2f', '~C07',
+                [q_rate, v_rate, pfc_trust]));
+
+    if Assigned(IdSNTPSrv) then
+      IdSNTPSrv.Stratum := my_stratum;
+
+  finally
+    fini.Free;
+  end;
+end;
+
+function TsvcTime.NTPAproxFactor(abs_ntp_ms: Double): Double;
+// Three zones relative to min_dvg (hard-correction threshold):
+//  [0 .. ntp_nuclear_ms)           acceptance curve: NTPAproxLow -> NTPAproxHigh
+//  [ntp_nuclear_ms .. min_dvg)     semi-nuclear: no hard correction available ->
+//                                  use NTPNuclearFloor (gentle speed nudge)
+//  [min_dvg .. inf)                full nuclear: hard correction handles position ->
+//                                  suppress speed (0.0), or 0.5 on confirmed streak
+begin
+  if abs_ntp_ms >= min_dvg then  // hard correction zone
+  begin
+    if ntp_sign_streak >= ntp_streak_count then
+      Result := 0.5
+    else
+      Result := 0.0;
+  end
+  else if abs_ntp_ms >= ntp_nuclear_ms then  // semi-nuclear: gentle nudge
+  begin
+    if ntp_sign_streak >= ntp_streak_count then
+      Result := 0.5
+    else
+      Result := ntp_nuclear_floor;
+  end
+  else if abs_ntp_ms <= ntp_aprox_low_ms then
+    Result := ntp_aprox_low
+  else if abs_ntp_ms >= ntp_aprox_high_ms then
+    Result := ntp_aprox_high
+  else
+    Result := ntp_aprox_low
+      + (ntp_aprox_high - ntp_aprox_low)
+      * (abs_ntp_ms - ntp_aprox_low_ms)
+      / (ntp_aprox_high_ms - ntp_aprox_low_ms);
+end;
+
 
 
 procedure TsvcTime.UpServer;
@@ -760,8 +928,50 @@ begin
 
 
  if ( log_verbose >= 3 ) and ( show_cpu_stat ) then
-    ODS( CFormat('[~d ~T]. #DBG: median CPU load = %.4f, by core = {%s }', '~C07', [load, by_core]));
+    wprintf('[~d ~T]. #DBG: median CPU load = %.4f, by core = {%s }~C07', [load, by_core]);
 
+end;
+
+
+procedure TsvcTime.CollectCPUStatDirect;
+// CPU load via GetSystemTimes fallback (no PDH/registry dependency)
+  function FTI (const ft: TFileTime): Int64; inline;
+  begin
+    Result := Int64 (ft.dwHighDateTime) shl 32 or ft.dwLowDateTime;
+  end;
+var
+  ft_idle, ft_kern, ft_user: TFileTime;
+  d_idle, d_total: Int64;
+  load: Double;
+  sz, i: Integer;
+  sum: Double;
+begin
+ if not GetSystemTimes (ft_idle, ft_kern, ft_user) then exit;
+ d_idle  := FTI (ft_idle)  - FTI (prv_sys_idle);
+ d_total := (FTI (ft_kern) - FTI (prv_sys_kernel)) + (FTI (ft_user) - FTI (prv_sys_user));
+ prv_sys_idle   := ft_idle;
+ prv_sys_kernel := ft_kern;
+ prv_sys_user   := ft_user;
+ if d_total <= 0 then exit;  // first call or wrap
+
+ load := 1.0 - d_idle / d_total;
+ if load < 0 then load := 0;
+ if load > 1 then load := 1;
+
+ sz := High (lst_cpu_load) + 1;
+ if cnt_cpu_load < sz then
+    Inc (cnt_cpu_load)
+ else
+    Move ( lst_cpu_load[1], lst_cpu_load[0], SizeOf(Double) * (sz - 1) );
+ lst_cpu_load [cnt_cpu_load - 1] := load;
+
+ sum := 0;
+ for i := 0 to cnt_cpu_load - 1 do
+     sum := sum + lst_cpu_load [i];
+ avg_cpu_load := sum / cnt_cpu_load;
+
+ if ( log_verbose >= 3 ) and ( show_cpu_stat ) then
+    wprintf ('[~d ~T]. #DBG: GetSystemTimes CPU load = %.4f~C07', [load]);
 end;
 
 
@@ -849,7 +1059,9 @@ begin
        begin
         scl.QueryEvent.ResetEvent;
         CollectCPUStat;
-       end;
+       end
+     else if not have_cpu_stat then
+       CollectCPUStatDirect;
 
 
     if (pwm_range > 0) and (pwm_allow) then
@@ -943,6 +1155,12 @@ begin
   begin
    st_adjust := st_adjust + IfV ( ch = '+', +15, -15 );
    UpdateSTA (TRUE);
+  end;
+
+ if (ch = 'C') then
+  begin
+   ODS('[~d ~T]. #RELOAD: Config reload requested by keyboard...');
+   ReloadConfig;
   end;
 
 
@@ -1071,6 +1289,23 @@ begin
 end;
 
 
+procedure TsvcTime.ResetConsoleSelection;
+// Cancel active QuickEdit selection by posting ESC to the console window.
+// SetConsoleMode toggle does NOT cancel an already-active selection;
+// WriteConsoleInput bypasses conhost selection handler -- PostMessage works.
+var
+  hwndCon: HWND;
+  selInfo: TConsoleSelectionInfo;
+begin
+  if not GetConsoleSelectionInfo (selInfo) then exit;
+  if (selInfo.dwFlags and $0001) = 0 then exit;  // CONSOLE_SELECTION_IN_PROGRESS
+  hwndCon := GetConsoleWindow;
+  if hwndCon = 0 then exit;
+  PostMessage (hwndCon, WM_KEYDOWN, VK_ESCAPE, $00010001);
+  PostMessage (hwndCon, WM_KEYUP,   VK_ESCAPE, $C0010001);
+end;
+
+
 function TsvcTime.QueryNTPPool: TDateTime;
 
 
@@ -1087,6 +1322,7 @@ var
     st: TSystemTime;
 
 begin
+ ResetConsoleSelection;
  result := 0;
  i := 0;
  ccnt := 0;
@@ -1138,7 +1374,7 @@ begin
     // ODS('[~d ~T]. #DBG: Connecting NTP server ~C0A' + s + '~C07...');
     rqt := 0;
     dt := 0;
-    ct := 0;
+    // ct := 0;
 
     // ================================== NTP TRANSACTION =========================== //
     try
@@ -1179,7 +1415,7 @@ begin
 
 
 
-    ct := ct + ( rqt * DT_ONE_MSEC ); // precision time with delay
+    // ct := ct + ( rqt * DT_ONE_MSEC ); // precision time with delay
 
     if dt = 0 then
       begin
@@ -1203,8 +1439,8 @@ begin
 
     if ( Abs (ntp_dt - dt) > 5 * DT_ONE_SECOND ) then
         begin
-         ODS(CFormat('[~d ~T].~C0C #WARN:~C07 Time response %s overrides with %s, due 5 seconds error', '~C07',
-                 [FormatDateTime('hh:nn:ss.zzz', dt), FormatDateTime('hh:nn:ss.zzz', ntp_dt) ]) );
+         wprintf('[~d ~T].~C0C #WARN:~C07 Time response %s overrides with %s, due 5 seconds error~C07',
+                 [FormatDateTime('hh:nn:ss.zzz', dt), FormatDateTime('hh:nn:ss.zzz', ntp_dt)]);
          dt := ntp_dt;
         end;
 
@@ -1310,15 +1546,18 @@ begin
 
 
  // формирование сальдо дивергенции, из самых лучших результатов
+ ntp_min_rtt_ms := 1e9;
  for n := 0 to i do
   begin
    dvg_rec := sorter [n];
    s := s + FmtDelay ( dvg_rec.dvg / DT_ONE_MSEC ) + ':' + FormatFloat('0.000 ', dvg_rec.weight);
    dvg_sum := dvg_sum + dvg_rec.weight *  dvg_rec.dvg;
+   if dvg_rec.rqt < ntp_min_rtt_ms then ntp_min_rtt_ms := dvg_rec.rqt;
    Inc (ccnt);
   end;
 
  if ccnt = 0 then exit;
+ if ntp_min_rtt_ms >= 1e9 then ntp_min_rtt_ms := 0; // guard against no servers selected
  if dvg_sum <> 0 then
     result := dvg_sum / ccnt;
 
@@ -1330,7 +1569,9 @@ begin
    end;
 
  ODS ('[~d ~T]. #DBG(' + IntToStr(n_ticks) + '): Stricted dvg:weight list =~C0A { ' + s + ' }~C07, ntp_diver = ~C0D' +
-       FmtDelay ( result / DT_ONE_MSEC ) + '~C07, max_error = ~C0D' + FmtDelay ( ntp_disp / DT_ONE_MSEC ) + '~C07');
+       FmtDelay ( result / DT_ONE_MSEC ) + '~C07, pool_disp = ~C0D' + FmtDelay ( ntp_disp / DT_ONE_MSEC ) +
+       '~C07, rtt_half = ~C0D' + FmtDelay ( ntp_min_rtt_ms / 2 ) +
+       '~C07, meas_floor = ~C0D' + FmtDelay ( ntp_min_rtt_ms / 2 + ntp_disp / DT_ONE_MSEC ) + '~C07');
 end; // QueryNTPPool
 
 
@@ -1410,8 +1651,8 @@ begin // ntp_dv == расхождение серверного и опорного периода в сутках
   wprintf('[~d ~T].~C0E #PFC_DBG:~C07 ticks elapsed =~C0D %d~C07, AdjustedCoef =~C0D %.11f~C07',
                   [ticks, pt.AdjustedCoef]);
 
-  ODS ( CFormat ('[~d ~T].~C0F #PROF(sync): ref_time = %s, pfc_time = %s, ntp_time = %s ~C07', '~C0F',
-                     [TimeToStrMS ( ref_time, 6 ), TimeToStrMS ( pfc_time, 6 ), TimeToStrMS ( ntp_time, 6 ) ] ) );
+  wprintf('[~d ~T].~C0F #PROF(sync): ref_time = %s, pfc_time = %s, ntp_time = %s ~C07',
+          [TimeToStrMS(ref_time, 6), TimeToStrMS(pfc_time, 6), TimeToStrMS(ntp_time, 6)]);
 
   ref_time := ntp_time; // MAIN SYNC.2
   if prv_ntp_time > 0 then
@@ -1512,9 +1753,24 @@ begin // ntp_dv == расхождение серверного и опорного периода в сутках
   else
    ODS('[~T].~C0C #WARN:~C07 g_timer.OwnRights = false ');
 
+  // q_rate: счЄтчик независим от PFC-калибровки Ч работает и при малом дрифте
+  Inc(ntp_poll_cnt);
+
   // если скорость расходитс€ 16 мс в час, это погрешность измерений
   if  ( pfc_period < 20000 ) or ( Abs(diver_per_hr) < 16 ) then
     begin
+     // низкий дрифт: оцениваем q_rate раз в pfc_ntp_dev.Size опросов
+     if (ntp_poll_cnt >= pfc_ntp_dev.Size) and (Abs(g_diff) < 1.0) then
+       begin
+        ntp_poll_cnt := 0;
+        var nr := AutoQueryRate(Abs(diver_per_hr));
+        if nr <> q_rate then
+          begin
+           q_rate := nr;
+           ODS('[~d ~T]. #DBG: NTPQueryRate changed to ~C0D' + IntToStr(q_rate) + '~C07 min.');
+           if log_verbose >= 7 then WinAPI.Windows.Beep(1000, 100);
+          end;
+       end;
      pt.StartOne (VTT_PERIOD, $F);
      exit;
     end;
@@ -1546,15 +1802,16 @@ begin // ntp_dv == расхождение серверного и опорного периода в сутках
 
   if (pfc_ntp_dev.Count = pfc_ntp_dev.Size) and (Abs(g_diff) < 1.0) then
     begin
-     pfc_ntp_dev.Clear;
-     i := AutoQueryRate ( Abs(dt) );
+      pfc_ntp_dev.Clear;
+      ntp_poll_cnt := 0;  // сброс low-drift счЄтчика при высокодрифтовой оценке
+      i := AutoQueryRate ( Abs(dt) );
     end;
 
   if i <> q_rate then
     begin
      q_rate := i;
      ODS('[~d ~T]. #DBG: NTPQueryRate changed to ~C0D' + IntToStr(i) + '~C07 min.');
-     if log_verbose >= 7 then Windows.Beep (1000, 100);
+     if log_verbose >= 7 then WinAPI.Windows.Beep (1000, 100);
     end;
 
  if pfc_save and ( cfg_file <> '' ) then
@@ -1566,45 +1823,453 @@ begin // ntp_dv == расхождение серверного и опорного периода в сутках
 end;
 
 
+procedure TsvcTime.InitFirstTick;
+// ќпредел€ет точность системного таймера при первом тике.
+var
+  ct, dt: TDateTime;
+begin
+  ODS('[~d ~T]. #DBG: Detecting system timer precision...');
+  TickAdjust(1);
+  pt.StartOne(VTT_PREC, $F);
+  ct := TickAdjust(100) / 100000.0;
+  dt := pt.Elapsed(VTT_PREC);
+  clock_coef := pt.ClocksElapsed(VTT_PREC); // must be 1 / (mega-clocks in millisecond)
+  if clock_coef > 0 then
+     clock_coef := dt / clock_coef;
+  accuracy := Round(dt * 100) / 10000;
+  if min_dvg <= 0 then
+     min_dvg := accuracy;
+  wprintf('[~d ~T]. #DBG:~C0E 100~C07 timer ticks requires about %.2f msec, so 1 tick = %.4f msec, loops/tick = %.3f K~C07',
+          [dt, accuracy, ct]);
+end;
+
+
+function TsvcTime.DoNTPQuery(minutes: Integer): Boolean;
+// ќпрашивает NTP-пул если пришло врем€. ¬озвращает False если CheckTime должен выйти.
+// ѕишет в пол€: ntp_diver, ntp_sync.
+var
+  meas_floor_ms: Double;
+begin
+  Result := True;
+  if not (((minutes mod q_rate = 0) or (n_ticks <= 5)) and (ref_time <> 0)) then
+    exit;
+
+  ntp_diver := QueryNTPPool;
+  if (ntp_dt = 0) or (ntp_diver = 0) then begin Result := False; exit; end;
+
+  // NTP uncertainty guard: skip sync if |diver| < min_error (RTD/2 + pool_dispersion)
+  meas_floor_ms := ntp_min_rtt_ms / 2 + ntp_disp / DT_ONE_MSEC;
+  if ntp_uncertainty_guard and (meas_floor_ms > 0) and
+     (Abs(ntp_diver / DT_ONE_MSEC) < meas_floor_ms) then
+  begin
+    wprintf('[~d ~T]. #DBG: NTP diver %.2f ms within meas_floor %.2f ms ' +
+            '(rtt_half=%.2f, pool_disp=%.2f), sync skipped~C07',
+            [ntp_diver / DT_ONE_MSEC, meas_floor_ms,
+             ntp_min_rtt_ms / 2, ntp_disp / DT_ONE_MSEC]);
+    ntp_diver := 0;
+    // ntp_sync stays False
+  end
+  else
+    ntp_sync := True;
+
+  DateTimeTools.ps_start_time := ntp_dt - pt.Elapsed(PS_LIVE_TIME) - 0.1;
+  wprintf('~C0B[~d ~T]. #DBG(ntp/sys):~C07 ntp_time = %s, precise = %s, local = %s ',
+          [FormatDateTime('hh:nn:ss.zzz', ntp_dt + pt.Elapsed(2) * DT_ONE_MSEC),
+           FormatDateTime('hh:nn:ss.zzz', PreciseTime),
+           FormatDateTime('hh:nn:ss.zzz', LocalDateTime)]);
+
+  if Abs(ntp_diver) > 7 then
+    begin
+     ODS('[~d ~T].~C0C #WARN: Hard time syncrhonizing - more than one week delta correction. ntp_date =~C0F { ' +
+           FormatDateTime('dd mmm yyyy hh:nn:ss.zzz }', ntp_dt) + '~C07 ');
+     SetLocalTimeDT(ntp_dt);
+     last_time := ntp_dt;
+     ref_time  := ntp_dt;
+     pt.startOne(VTT_TIMER, $F);
+     pt.startOne(VTT_PERIOD, $F);
+     n_ticks := 0;
+     Result := False;
+    end;
+end;
+
+
+
+
+
+procedure TsvcTime.ApplyClockSync(dta: TDateTime; var calct: Double);
+// Syncs Windows system clock to PFC (sync_expected=True) or logs out-of-bounds delta.
+// Uses fields: dta_ms, sync_expected, ntp_sync, ntp_diver. Writes: calct, ntp_sync_cnt.
+var dt, add, ct, ctc: TDateTime;
+    last_sync_elps: Double;
+    slot: TVirtualTimerRecord;
+    s: String;
+begin
+  last_sync_elps := pt.Elapsed(VTT_LAST_SYNC);
+
+  if sync_expected then
+    begin
+     Inc(sync_cnt);
+
+     if Abs(dta_ms) > 80 then dta_ms := Sign(dta_ms) * 80; // strict
+
+     if ema_delta = 0 then
+        ema_delta := dta_ms * 0.9
+     else
+       begin
+        if Abs(dta_ms) < Abs(ema_delta) then
+           ema_delta := (ema_delta * 0.3) + dta_ms * 0.7
+        else
+           ema_delta := (ema_delta * 0.9) + dta_ms * 0.1;
+       end;
+
+     s := '-------------------------------------------------------------------------------------------------------------------------'#13#10;
+     s := s + '[~d ~T].~C0F #MSG(Sync): Syn' + Chr(1089) + 'hronizing clocks with ~C0E PFC timer' +
+              '~C0F, correcting delta(sec) ' + IfV(dta > 0, '~C0A', '~C0C') +
+               FormatFloat('0.###', dta / DT_ONE_SECOND) + '~C0F';
+
+     if (last_sync_elps >= 50000) and (ema_delta <> 0) then
+       begin
+        cum_dvg := cum_dvg + dta;
+        calct := cum_dvg / DT_ONE_SECOND;
+
+        ct  := MSEC_IN_HOUR / last_sync_elps;
+        add := ema_delta * ct * 0.75;
+
+        dta := dta * aprox_fact;
+
+        s := s + ', with value ' + IfV(dta > 0, '~C0A', '~C0C') + FormatFloat('0.###', dta / DT_ONE_SECOND) + '~C0F';
+        s := s + ', cumulative delta(sec) ' + IfV(calct > 0, '~C0A', '~C0C') + FormatFloat('0.###', calct) + ' ~C0F';
+        s := s + #13#10#9#9'       ~C0E#DBG(Sync): ema_delta =~C0D ' + ftow(ema_delta, '%.5f') +
+                   '~C0E msec,~C0F (' + FormatFloat('0.###', ema_delta * ct) + ' ms/h) ~C0E' +
+                   ' ratio for dta = ~C0D' + ftow(ct, '%.5f') + '~C0E, add =~C0D ' + ftow(add, '%.5f');
+       end;
+
+     s := s + '~C0B'#13#10#9#9'       ';
+     s := s + '#DBG(Sync): sync_cnt =~C0D ' + IntToStr(sync_cnt) + '~C0B';
+     s := s + ', local timer ticks ~C0E' + IfV(dta > 0, 'slower', 'faster') + '~C0B';
+     s := s + ', from last sync elapsed = ~C0D' + FmtDelay(last_sync_elps, 7, 's') + '~C0B';
+
+     ODS(s + '~C07');
+     if Abs(dta) > 1000 then
+       begin
+        WinAPI.Windows.Beep(1000, 230);
+        WinAPI.Windows.Beep(600,  230);
+        WinAPI.Windows.Beep(1300, 230);
+       end;
+
+     TickAdjust(2);
+     dt := CurrentDateTime + dta;
+     pt.StartOne(VTT_LAST_SYNC);
+     clk_pfc_dev.Clear;
+     IndySetLocalTime(dt);
+
+     if g_timer.OwnRights then
+       begin
+        slot := g_timer.ActiveSlot^;
+        slot.clock_syn := DateTimeToTimeStamp(dt).Time;
+        g_timer.Update(slot);
+       end;
+
+     last_time := dt;
+     if ntp_sync then Inc(ntp_sync_cnt);
+    end
+  else
+    begin
+     // out-of-bounds delta: log, don't sync
+     ct := last_sync_elps / 1000;
+     if ct <= 500 then exit;
+     ctc   := dta / DT_ONE_MSEC;
+     calct := ctc / ct * 3600.0;
+
+     wprintf('[~d ~T]. #DBG: Sync delta %s, is outbound settings %.1f - %.1f, from last sync elapsed = %s, stable dev = %7.1f ms/h~C07',
+             [FmtDelay(ctc), min_dvg, max_dvg, FmtDelay(last_sync_elps), calct]);
+
+     ct := ntp_diver / DT_ONE_MSEC;
+     s  := InfoFmt('~D ~T;', g_timer.GetTime) + Format('%.3f;%.3f;%d;%d;', [ctc, ct, st_adjust, pwm_split]);
+     SaveToLog(nosync_log, s);
+    end;
+end;
+
+
+procedure TsvcTime.ApplyHWAdjust(var calct: Double);
+// PD-like controller: computes speed correction (ref_dta) and updates st_adjust/pwm_split.
+// Uses fields: dta_ms, last_chk_elps, stab_cross, sync_expected.
+// Writes: calct (instantaneous drift ms/h), prv_dev, st_adjust, pwm_split, drift_ema.
+// No-op when conditions not met (low elapsed, no hw_adjust, no drift data, sync pending).
+var ref_dta, accel: Double;
+    at_extremum: Boolean;
+    slot: TVirtualTimerRecord;
+    pwm_step: Integer;
+    s: String;
+begin
+  if not ((last_chk_elps > 10000) and hw_adjust and (clk_pfc_dev.Count <> 0) and (not sync_expected)) then exit;
+
+  pt.StartOne(VTT_LAST_CHECK);
+  calct := MSEC_IN_HOUR * dta_ms / last_chk_elps;
+
+  if g_timer.OwnRights then
+    begin
+     slot := g_timer.ActiveSlot^;
+     slot.clock_dvg := calct;
+     g_timer.Update(slot);
+    end
+  else
+    ODS('[~T].~C0C #WARN:~C07 not have rights for g_timer');
+
+  if prv_dev = 0 then prv_dev := calct;
+
+  accel := Abs(calct) - Abs(prv_dev);
+
+
+  // EMA snap-to: low drift => trust EMA, skip PD arithmetic.
+  // accel not checked: calct in ms/h is noisy at short intervals,
+  // any small dta_ms change causes large accel even when drift is stable.
+  if (Abs(dta_ms) < 0.5) and (st_adjust_ema <> 0) and not stab_cross then
+    begin
+     var snapped := Min(max_st_adjust, Max(min_st_adjust, Round(st_adjust_ema)));
+     if snapped <> st_adjust then
+       begin
+        wprintf('[~d ~T]. #PWM: EMA snap: %d -> %d (dta=%.2fms, accel=%.2f)~C07',
+                [st_adjust, snapped, dta_ms, accel]);
+        st_adjust := snapped;
+        UpdateSTA(True);
+       end;
+     prv_dev := calct;
+     exit;
+    end;
+
+
+  at_extremum    := prv_accel_pos and (accel < 0) and not stab_cross;
+  prv_accel_pos  := (accel >= 0) and not stab_cross;
+
+  ref_dta := Abs(accel) * Sign(calct);
+
+  if stab_cross then
+    begin
+     prv_dev   := 0;
+     drift_ema := 0;
+     if st_adjust_ema <> 0 then
+       begin
+        wprintf('[~d ~T]. #PWM: zero-cross snap: st_adjust %d -> EMA %d (delta %+d)~C07',
+                [st_adjust, Round(st_adjust_ema), Round(st_adjust_ema) - st_adjust]);
+        st_adjust := Min(max_st_adjust, Max(min_st_adjust, Round(st_adjust_ema)));
+        UpdateSTA(True);
+        ref_dta := 0;
+        s := '0x+ema';
+       end
+     else
+       begin
+        ref_dta := -ref_dta + calct * 0.9;
+        s := '0x';
+       end;
+    end
+  else
+  if accel >= 0 then
+    begin
+     if ref_dta = 0 then ref_dta := calct;
+     if not sync_expected then ref_dta := ref_dta * 2;
+     s := '++';
+    end
+  else
+    begin
+     if (Abs(calct) < 5) and (st_adjust_ema <> 0) then
+       begin
+        var pull := (st_adjust_ema - st_adjust) * 0.05;
+        if Abs(pull) > 10 then pull := Sign(st_adjust_ema - st_adjust) * 10;
+        ref_dta := pull;
+        s := Format('-- hold+pull(%.1f toward EMA %d)', [pull, Round(st_adjust_ema)]);
+       end
+     else
+       begin
+        ref_dta := 0;
+        s := '-- hold';
+       end;
+    end;
+
+  if (Abs(dta_ms) < 1) and (Abs(ref_dta) < 100) then clk_pfc_dev.Clear;
+
+  if (ref_dta_ema_tc >= 2) and (Abs(dta_ms) < 1) and (Abs(ref_dta) < 100) then
+    begin
+     if ref_dta_ema = 0 then
+        ref_dta_ema := ref_dta
+     else
+        ref_dta_ema := ref_dta_ema * ((ref_dta_ema_tc - 1) / ref_dta_ema_tc)
+                     + ref_dta * (1.0 / ref_dta_ema_tc);
+     ref_dta := ref_dta_ema;
+    end
+  else
+    ref_dta_ema := 0;
+
+  // Speed correction scaling: NTP-path vs PFC-trust path
+  if ntp_sync then
+    begin
+     var ntp_ms_val := ntp_diver / DT_ONE_MSEC;
+     if (prv_ntp_ms = 0) or (Sign(ntp_ms_val) = Sign(prv_ntp_ms)) then
+       ntp_sign_streak := Min(ntp_sign_streak + 1, 99)
+     else
+       ntp_sign_streak := 1;
+     prv_ntp_ms := ntp_ms_val;
+     var ntp_factor := NTPAproxFactor(Abs(ntp_ms_val));
+     if ntp_factor < 1.0 then
+       wprintf('[~d ~T]. #DBG: NTP aprox factor=%.2f (ntp=%.1f ms, streak=%d)~C07',
+               [ntp_factor, ntp_ms_val, ntp_sign_streak]);
+     ref_dta := ref_dta * ntp_factor;
+    end
+  else if pfc_trust < 1.0 then
+    ref_dta := ref_dta * pfc_trust;
+
+  pwm_allow := Abs(calct) < 150;
+
+  if (Abs(calct) > 0.1) and (Abs(ref_dta) > 0.01) then
+    begin
+     drift_ema := 0;
+     ODS('~C0E[~d ~T]. #DBG: Stat. timer drift = ' + FmtDelay(calct, 7, 'sc') + '~C0F / h' +
+         '~C0E, previous = ' + FmtDelay(prv_dev, 7, 'sc') +
+         '~C0F / h~C0E, used accel(' + s + ') = ' + FmtDelay(ref_dta, 7, 'sc') + '~C0F / h~C07');
+
+     pwm_allow := False;
+     if (Abs(ref_dta) > 25) or (Abs(st_adjust) > 5000) then
+       begin
+        if Abs(ref_dta) > 3000 then ref_dta := Sign(ref_dta) * 3000;
+        if Abs(ref_dta) > 100 then
+           st_adjust := st_adjust + Round(ref_dta)
+        else
+           st_adjust := st_adjust + Round(Sign(ref_dta) * 25);
+       end;
+
+     if Abs(dta_ms) < 5 then
+       begin
+        pwm_allow := True;
+        pwm_step  := pwm_range div 100;
+        if pwm_split_ema = 0 then
+           pwm_split_ema := pwm_split
+        else
+           pwm_split_ema := pwm_split_ema * 0.99 + pwm_split * 0.01;
+
+        if Abs(dta_ms) < 30 then
+          begin
+           if Abs(ref_dta) < 500 then pwm_step := pwm_step div 10;
+           if Abs(ref_dta) < 100 then pwm_step := IfV(Abs(dta_ms) < 1, 5, 20);
+          end;
+
+        if ref_dta < 0 then pwm_split := pwm_split - pwm_step;
+        if ref_dta > 0 then pwm_split := pwm_split + pwm_step;
+
+        if pwm_split <= 0 then
+          begin
+           pwm_split := pwm_range - pwm_step;
+           Dec(st_adjust, 25);
+          end;
+        if pwm_split >= pwm_range then
+          begin
+           pwm_split := 0 + pwm_step;
+           Inc(st_adjust, 25);
+          end;
+
+        {
+        if stab_cross and (Abs(ref_dta) > 100) then
+          begin
+           if ((dta_ms < 0) and (pwm_split_ema < pwm_split)) or
+              ((dta_ms > 0) and (pwm_split_ema > pwm_split)) then pwm_split := Round(pwm_split_ema);
+          end; }
+
+        ODS(#9#9#9'~C0A pwm_split changed to ~C0D' + IntToStr(pwm_split) + '~C07');
+       end; // PWM
+
+     st_adjust := Min(st_adjust, max_st_adjust);
+     st_adjust := Max(st_adjust, min_st_adjust);
+
+     if ((st_adjust_ema_mode = 0) and at_extremum) or
+        ((st_adjust_ema_mode = 1) and
+          (Abs(dta_ms) < st_adjust_ema_thr) and (Abs(prv_dta_ms) < st_adjust_ema_thr)) then
+       begin
+        if st_adjust_ema = 0 then
+           st_adjust_ema := st_adjust
+        else
+           st_adjust_ema := st_adjust_ema * 0.75 + st_adjust * 0.25;
+        wprintf('[~d ~T]. #PWM: EMA updated (mode=%d): %.0f (st_adjust=%d)~C07',
+                [st_adjust_ema_mode, st_adjust_ema, st_adjust]);
+       end;
+     UpdateSTA(log_verbose >= 5);
+    end;
+
+  if sync_expected then
+     drift_ema := 0
+  else
+     prv_dev := calct;
+end;
+
+
+procedure TsvcTime.SyncPFCWithNTP;
+// Adjusts PFC timer speed to match NTP; logs sync event. ntp_sync and ntp_diver must be set.
+begin
+  AdjustPFCTimerSpeed(ntp_diver);
+  Inc(rsync_cnt);
+  if rsync_cnt > 2 then
+    SaveToLog(stats_file, InfoFmt('~D ~t;') + FormatFloat('0.00', ntp_diver / DT_ONE_MSEC) + ';' +
+              '0.00;' +
+              FormatFloat('0.0', (ntp_diver + cum_dvg) / DT_ONE_MSEC) + ';' +
+              FormatFloat('0.0', pfc_ntp_dev.Last) + ';' + FormatFloat('0.0000', pfc_adjust));
+  if Assigned(IdSNTPSrv) then
+    IdSNTPSrv.RefTimeStamp := prv_ntp_time;
+  drift_ema := 0;
+end;
+
+
+function TsvcTime.MeasureVirtualDrift(minutes: Integer; var calct: Double): TDateTime;
+// Measures PFC vs system clock drift. Returns raw drift (TDateTime); sets calct (ms/h).
+// If measurement conditions not met, returns 0 and calct is unchanged.
+var ctc: TDateTime;
+    n:   Integer;
+begin
+  Result := 0;
+  ctc := pt.Elapsed(VTT_TIMER);
+  if not ((minutes mod v_rate = 0) and (ref_time <> 0) and (ctc > 1000)) then exit;
+
+  if drift_ema <> 0 then
+    begin
+     Result := drift_ema;
+     if (drift_l < drift_h) and (drift_l <> 0) then
+       wprintf('~C09[~d ~T]. #DBG:~C07 VTT drift stat, low = %s, high = %s',
+               [FmtDelay(drift_l / DT_ONE_MSEC), FmtDelay(drift_h / DT_ONE_MSEC)]);
+     drift_l := Result;
+     drift_h := Result;
+    end
+  else
+    begin
+     Result := 0;
+     for n := 1 to 5 do
+       Result := Result + CompareVirtualTimer(0);
+     Result := Result / 5;
+    end;
+
+  calct := Result / DT_ONE_MSEC;
+  calct := MSEC_IN_HOUR * calct / ctc;
+  if ctc > 30000 then
+    clk_pfc_dev.Add(calct);
+  if rsync_cnt <= 2 then
+    pwm_allow := True;
+end;
+
+
 procedure TsvcTime.CheckTime;
+
 
 var
    st: TSystemTime;
    minutes: Integer;
-   add, calct, ct, ctc, dt, dta: TDateTime;
-   ntp_diver, ref_dta, accel: Double;
-   n, pwm_step: Integer;
-   // max_v, min_v: Double;
-   dta_ms, abs_ms, last_sync_elps, last_chk_elps: Double;
-   sync_expected: Boolean;
-   ntp_sync, stab_cross, at_extremum: Boolean;
-   slot: TVirtualTimerRecord;
-   s: String;
-
+   ct, dt, dta: TDateTime;
+   calct: Double;
 
 
 begin
  calct := 0;
  sync_break := FALSE;
+ sync_expected := FALSE;
+ last_chk_elps := 0;
 
- if n_ticks = 1 then
-   begin
-    ODS ('[~d ~T]. #DBG: Detecting system timer precision...');
-    TickAdjust(1);
-    pt.StartOne (VTT_PREC, $F);
-    ct := TickAdjust (100) / 100000.0;
-    dt := pt.Elapsed (VTT_PREC);
-    clock_coef := pt.ClocksElapsed (VTT_PREC);  ; // must be 1 / (mega-clocks in millisecond)
-    if clock_coef > 0 then
-       clock_coef := dt / clock_coef;
 
-    accuracy :=  Round ( dt * 100 ) / 10000; // round to 4 digits
-
-    if min_dvg <= 0 then
-       min_dvg := accuracy;
-    ODS ( CFormat ('[~d ~T]. #DBG:~C0E 100~C07 timer ticks requires about %.2f msec, so 1 tick = %.4f msec, loops/tick = %.3f K ', '~C07', [dt, accuracy, ct]) );
-
-   end;
+  if n_ticks = 1 then InitFirstTick;
 
 
 
@@ -1645,8 +2310,8 @@ begin
  ODS('[~d ~T].~C08 #DBG(SyncFrame): -------------------------------------------------------------------------------------------------~C07');
 
  if ( prv_minute mod 10 = 0 ) and Assigned (IdSNTPSrv) then
-    ODS( CFormat('[~d ~T].~C0E #STAT: Summary traffic, incoming = %.1f KiB, outcoming = %.1f KiB ~C07', '~C07',
-                [IdSNTPSrv.InTraffic / 1024.0, IdSNTPSrv.OutTraffic / 1024.0]) );
+    wprintf('[~d ~T].~C0E #STAT: Summary traffic, incoming = %.1f KiB, outcoming = %.1f KiB ~C07',
+            [IdSNTPSrv.InTraffic / 1024.0, IdSNTPSrv.OutTraffic / 1024.0]);
 
  Sleep (check_delay);
 
@@ -1662,118 +2327,43 @@ begin
    end;
 
 
- ct := 0;
-
- ntp_diver := 0;
- // ******************************************************************************************************************************* //
- // ==================================== «апрос времени у пула серверов =========================================================== //
- // Buzzz                                                                                                                           //
-
- if ( ( minutes mod q_rate = 0) or (n_ticks <= 5) or ( Abs (ct) >= 10 * min_dvg ) ) and
-      ( ref_time <> 0 )  then
-     begin
-      ntp_diver := QueryNTPPool;                 // получение расхождени€ времени системного(?) таймера и серверов источников.
-      if ( ntp_dt = 0 ) or ( ntp_diver = 0 ) then exit;
-      ntp_sync := TRUE;
-      DateTimeTools.ps_start_time := ntp_dt - pt.Elapsed (PS_LIVE_TIME) - 0.1; // подавление ругани
-      wprintf('~C0B[~d ~T]. #DBG(ntp/sys):~C07 ntp_time = %s, precise = %s, local = %s ',
-                [FormatDateTime('hh:nn:ss.zzz', ntp_dt + pt.Elapsed(2) * DT_ONE_MSEC) ,
-                 FormatDateTime('hh:nn:ss.zzz', PreciseTime),
-                 FormatDateTime('hh:nn:ss.zzz', LocalDateTime)]);
 
 
-      // clk_ntp_dev.Add (ntp_dev);
-
-      if Abs (ntp_diver) > 7 then
-         begin
-          ODS('[~d ~T].~C0C #WARN: Hard time syncrhonizing - more than one week delta correction. ntp_date =~C0F { ' +
-                FormatDateTime('dd mmm yyyy hh:nn:ss.zzz }', ntp_dt) + '~C07 ');
-          SetLocalTimeDT (ntp_dt);
-          last_time := ntp_dt;
-          ref_time := ntp_dt;
-          pt.startOne (VTT_TIMER, $F); // HARDSYNC
-          pt.startOne (VTT_PERIOD, $F);
-          n_ticks := 0;
-          exit;
-         end;
-     end;
+  ntp_diver := 0;
+  ntp_sync  := False;
+  if not DoNTPQuery(minutes) then exit;
 
 
 
 
- /// =================================== —»Ќ’–ќЌ»«ј÷»я ¬»–“”јЋ№Ќќ√ќ “ј…ћ≈–ј — —≈“≈¬џћ ¬–≈ћ≈Ќ≈ћ =========================
- if ntp_sync and ( Abs (ntp_diver / DT_ONE_MSEC) > 0.01 ) then
-  begin
-   // ======================================== јвтоподстройка виртуального таймера =================================================== //
-   AdjustPFCTimerSpeed ( ntp_diver );
-   Inc (rsync_cnt);
+ if ntp_sync and (Abs(ntp_diver / DT_ONE_MSEC) > 0.01) then
+   SyncPFCWithNTP;
 
-   // sys_pfc_dev.Clear;  // чтобы статистика не сбивалась
-
-   if rsync_cnt > 2 then
-      SaveToLog ( stats_file, InfoFmt ('~D ~t;') + FormatFloat('0.00', ntp_diver / DT_ONE_MSEC) + ';' + FormatFloat('0.00', ct / DT_ONE_MSEC) + ';' +
-                  FormatFloat('0.0', (ntp_diver + cum_dvg) / DT_ONE_MSEC) + ';' +
-                  FormatFloat('0.0', pfc_ntp_dev.Last) + ';' + FormatFloat ('0.0000', pfc_adjust) );
-
-   if Assigned (IdSNTPSrv) then
-      IdSNTPSrv.RefTimeStamp := self.prv_ntp_time;
-
-   drift_ema := 0;
-  end;
-
-
- ctc := pt.Elapsed (VTT_TIMER);
- // ctc := 0;
-
- if ( minutes mod v_rate = 0) and (ref_time <> 0) and ( ctc > 1000 ) then
-     begin
-
-      // получение оценки расхождени€ виртуального и системного времени
-
-      if drift_ema <> 0 then
-       begin
-        ct := drift_ema;
-        if (drift_l < drift_h) and (drift_l <> 0) then
-          wprintf ('~C09[~d ~T]. #DBG:~C07 VTT drift stat, low = %s, high = %s',
-                      [ FmtDelay (drift_l / DT_ONE_MSEC), FmtDelay(drift_h / DT_ONE_MSEC)] );
-
-        drift_l := ct;
-        drift_h := ct;
-       end
-      else
-       begin
-        // локальное усреднение
-        ct := 0;
-        for n := 1 to 5 do
-            ct := ct + CompareVirtualTimer (0); // сравнивать с виртуальным
-        ct := ct / 5;
-       end;
-
-      calct := ct / DT_ONE_MSEC;              // приведение к миллисекундам
-      calct := MSEC_IN_HOUR * calct / ctc; // экстраполированное расхождение в час
-      // если период замера более 30 секунд, надо добавить в статистику
-      if ( ctc > 30000) then
-          clk_pfc_dev.Add ( calct );
-
-      if (rsync_cnt <= 2) then
-          pwm_allow := TRUE;
-      // ctc := CompareVirtualTimer (1);
-     end;
+ ct := MeasureVirtualDrift(minutes, calct);
 
  // основным расхождением €вл€етс€ sys<->pfc
- if pfc_errors > 0 then exit;
+ if pfc_errors > 0 then
+   begin
+     if ntp_sync then
+       WriteDriftLog (0, calct, ntp_diver / DT_ONE_MSEC, last_chk_elps, sync_expected, ntp_sync);
+     exit;
+   end;
 
 
  dta := IfV ( n_ticks <= 4, CompareVirtualTimer (0), ct ); // clk<->pfc diff
 
- if dta = 0 then exit; // половина микросекунды не стоит корректировки скорости?
-
+ dta_ms := dta / DT_ONE_MSEC;
+ if dta = 0 then
+   begin
+     WriteDriftLog (dta_ms, calct, ntp_diver / DT_ONE_MSEC, last_chk_elps, sync_expected, ntp_sync);
+     exit;
+   end;
 
  stab_cross := FALSE;
- dta_ms := dta / DT_ONE_MSEC;
- wprintf('[~d ~T]. #DBG: system clock <-> PF clock diff = %.1f ms', [dta_ms]);
+  wprintf('[~d ~T]. #DBG: system clock <-> PF clock diff = %.1f ms%s',
+          [dta_ms, IfThen(dta_ms < -0.5, ' (sys lags PFC)', IfThen(dta_ms > 0.5, ' (sys ahead PFC)', ''))]);
 
- abs_ms := Abs (dta_ms);
+ // abs_ms := Abs (dta_ms);
 
  if (prv_dta_ms <> 0) then
      stab_cross := ( Sign (dta_ms) <> Sign (prv_dta_ms) );  // пересечение нул€ - приближение к точке стабильности
@@ -1781,323 +2371,15 @@ begin
 
  prv_dta_ms := dta_ms;
 
- last_sync_elps := pt.Elapsed (VTT_LAST_SYNC);
  last_chk_elps := pt.Elapsed (VTT_LAST_CHECK);
 
  sync_expected := (n_ticks <= 4) or (( Abs (dta) >= min_dvg * DT_ONE_MSEC) and ( Abs(dta) <= max_dvg * DT_ONE_MSEC));
 
- // ========================= ћя√ јя —»Ќ’–ќЌ»«ј÷»я: ѕќƒ√ќЌ ј — ќ–ќ—“» —»—“≈ћЌќ√ќ “јйћ≈–ј к ¬»–“”јЋ№Ќќћ” ==============================
- // Ётот подход используетс€ при отсутствии необходимости синхронизировать большую разницу.
 
- if ( last_chk_elps > 10000 ) and ( hw_adjust ) and ( clk_pfc_dev.Count <> 0 ) and ( not sync_expected ) then
-   begin
-    pt.StartOne (VTT_LAST_CHECK);
-    // рассчет дельта-значений в час
-    calct := MSEC_IN_HOUR * dta_ms / last_chk_elps;
+ ApplyHWAdjust(calct);
 
-    if g_timer.OwnRights then
-      begin
-       slot := g_timer.ActiveSlot^;
-       slot.clock_dvg := calct; // расхождение периодов
-       g_timer.Update ( slot );
-      end
-    else
-      begin
-       ODS('[~T].~C0C #WARN:~C07 not have rights for g_timer');
-      end;
+ ApplyClockSync(dta, calct);
 
-    // calct := sys_pfc_dev.Last;
-    // calct := dta_ms;
-
-    if prv_dev = 0 then
-       prv_dev := calct;
-
-
-    accel := Abs (calct) - Abs (prv_dev);
-
-    // Ёкстремум |дрифт|: переход от роста к убыванию Ч здесь st_adjust наиболее точно
-    // отражает истинный сдвиг частоты кварца, поэтому именно здесь обновл€ем EMA.
-    at_extremum := prv_accel_pos and (accel < 0) and not stab_cross;
-    prv_accel_pos := (accel >= 0) and not stab_cross;
-
-    ref_dta := Abs (accel) * Sign (calct);
-    // then zero-line cross
-    if stab_cross then
-      begin
-       prv_dev := 0;
-       drift_ema := 0;
-       if st_adjust_ema <> 0 then
-         begin
-          // ѕри пересечении нул€ Ч мгновенно примен€ем накопленную EMA скорости.
-          // ”бирает полуцикл торможени€: часы сразу выход€т на равновесную скорость.
-          ODS(CFormat('[~d ~T]. #PWM: zero-cross snap: st_adjust %d -> EMA %d (delta %+d)', '~C0A',
-                      [st_adjust, Round(st_adjust_ema), Round(st_adjust_ema) - st_adjust]));
-          st_adjust := Min(max_st_adjust, Max(min_st_adjust, Round(st_adjust_ema)));
-          UpdateSTA(True);
-          ref_dta := 0; // outer if пропустит Ч коррекци€ уже применена
-          s := '0x+ema';
-         end
-       else
-         begin
-          ref_dta := - ref_dta + calct * 0.9; // smart brake (до накоплени€ EMA)
-          s := '0x';
-         end;
-      end
-    else
-    // then deviation growth
-    if ( accel >= 0 ) then
-      begin
-       if ref_dta = 0 then ref_dta := calct;
-
-       if not sync_expected then ref_dta := ref_dta * 2;
-       s := '++';
-      end
-    else
-    // then deviation down
-      begin
-       s := '--'; // braking
-       if abs_ms > 100 then
-          ref_dta := - ref_dta * 0.1 else
-       if abs_ms > 050 then
-          ref_dta := - ref_dta * 0.3 else
-       if abs_ms > 030 then
-          ref_dta := - ref_dta * 0.5 else
-       if abs_ms > 010 then
-          ref_dta := - ref_dta * 0.9 else
-          ref_dta := - ref_dta * 0.99;
-      end;
-
-
-    if ( Abs(dta_ms) < 1 ) and ( Abs(ref_dta) < 100 )  then clk_pfc_dev.Clear;
-
-    // Fast EMA сигнала коррекции: сглаживает шум при малом дрифте.
-    // јктивна только когда |dta_ms| < 1 мс и |ref_dta| < 100 мс/ч (зона точной подстройки).
-    // TC задаЄтс€ параметром RefDtaEmaTC (0/1 = выкл, default 2).
-    if (ref_dta_ema_tc >= 2) and (Abs(dta_ms) < 1) and (Abs(ref_dta) < 100) then
-      begin
-       if ref_dta_ema = 0 then
-          ref_dta_ema := ref_dta
-       else
-          ref_dta_ema := ref_dta_ema * ((ref_dta_ema_tc - 1) / ref_dta_ema_tc)
-                       + ref_dta      * (1.0 / ref_dta_ema_tc);
-       ref_dta := ref_dta_ema;
-      end
-    else
-      ref_dta_ema := 0;  // сброс при выходе из зоны малого дрифта
-
-    // PFCTrust: при отсутствии NTP-синхронизации в данном цикле снижаем агрессивность
-    // коррекции скорости часов, т.к. ref_dta вычислен только по PFC-таймеру.
-    // ѕри нестабильном PFC (VM, троттлинг CPU) часть "дрифта" Ч шум самого €кор€.
-    // pfc_trust=1.0 Ч полное доверие (default); 0.5 Ч половина коррекции; 0.0 Ч заморозка.
-    if (not ntp_sync) and (pfc_trust < 1.0) then
-      ref_dta := ref_dta * pfc_trust;
-
-    pwm_allow := Abs ( calct ) < 150;
-
-    if ( Abs (calct) > 0.1  ) and  ( Abs (ref_dta) > 0.01 ) then
-       begin
-        drift_ema := 0; // reset allocation
-        ODS('~C0E[~d ~T]. #DBG: Stat. timer drift = ' + FmtDelay (calct, 7, 'sc') + '~C0F / h' +
-            '~C0E, previous = ' + FmtDelay (prv_dev, 7, 'sc') +
-            '~C0F / h~C0E, used accel(' + s + ') = ' + FmtDelay (ref_dta, 7, 'sc') + '~C0F / h~C07' );
-
-        pwm_allow := FALSE;
-        if ( Abs (ref_dta) > 25 ) or ( Abs (st_adjust) > 5000 ) then // PWM
-          begin
-           // FIX-B: ограничиваем разовый шаг коррекции st_adjust.
-           // Ѕез этого при коротком last_chk_elps или после сброса prv_dev
-           // ref_dta мог достигать 10000+ мс/ч за одну итерацию, что
-           // вызывало резкий overshooting и последующую осцилл€цию ±300 мс.
-           if Abs (ref_dta) > 3000 then
-              ref_dta := Sign(ref_dta) * 3000;
-
-           if Abs (ref_dta) > 100 then
-              st_adjust := st_adjust + Round ( ref_dta )
-           else
-              st_adjust := st_adjust + Round ( Sign(ref_dta) * 25 );
-          end;
-
-        if ( Abs(dta_ms) < 5 ) then
-          begin
-           pwm_allow := TRUE;
-           pwm_step := pwm_range div 100;
-           if pwm_split_ema = 0 then
-              pwm_split_ema := pwm_split
-           else
-              pwm_split_ema := pwm_split_ema * 0.99 + pwm_split * 0.01;
-
-
-           if ( Abs(dta_ms) < 30) then
-            begin
-             if ( Abs(ref_dta) < 500 ) then
-               pwm_step := pwm_step div 10;
-             if ( Abs(ref_dta) < 100 ) then
-               pwm_step := IfV ( Abs(dta_ms) < 1, 5, 20 );
-            end;
-
-
-           if (ref_dta < 0) then pwm_split := pwm_split - pwm_step; // увеличение периода медленного хода часов, если наблюдаетс€ спешка системного таймера
-
-           if (ref_dta > 0) then pwm_split := pwm_split + pwm_step; // увеличение периода быстрого хода часов
-
-
-           if pwm_split <= 0 then
-             begin
-              pwm_split := pwm_range - pwm_step;
-              Dec (st_adjust, 25);
-             end;
-           if pwm_split >= pwm_range then
-             begin
-              pwm_split := 0 + pwm_step;
-              Inc (st_adjust, 25);
-             end;
-
-           // отработка смещени€ к средней
-           {
-           if stab_cross and ( Abs(ref_dta) > 100 ) then
-            begin
-             if ((dta_ms < 0) and (pwm_split_ema < pwm_split)) or
-                ((dta_ms > 0) and (pwm_split_ema > pwm_split)) then pwm_split := Round (pwm_split_ema);
-            end; // }
-
-
-           ODS (#9#9#9'~C0A pwm_split changed to ~C0D' + IntToStr(pwm_split) + '~C07' );
-          end; // PWM
-
-
-        st_adjust := Min (st_adjust, max_st_adjust);
-        st_adjust := Max (st_adjust, min_st_adjust);
-        // ќбновление EMA скорости часов Ч два режима (EmaSpeedMode):
-        //   0 (default): на экстремуме Ч когда |дрифт| достиг максимума и начал убывать
-        //   1: когда последние 2 измерени€ |dta_ms| оба ниже порога EmaSpeedThr (мс)
-        if ( (st_adjust_ema_mode = 0) and at_extremum ) or
-           ( (st_adjust_ema_mode = 1) and
-             (Abs(dta_ms) < st_adjust_ema_thr) and (Abs(prv_dta_ms) < st_adjust_ema_thr) ) then
-          begin
-           if st_adjust_ema = 0 then
-              st_adjust_ema := st_adjust
-           else
-              st_adjust_ema := st_adjust_ema * 0.75 + st_adjust * 0.25; // TC ~= 4 выборки
-           ODS(CFormat('[~d ~T]. #PWM: EMA updated (mode=%d): %.0f (st_adjust=%d)', '~C0B',
-                       [st_adjust_ema_mode, st_adjust_ema, st_adjust]));
-          end;
-        UpdateSTA ( log_verbose >= 5 );
-       end;
-
-    if sync_expected then
-      begin
-       // FIX-A: не сбрасываем prv_dev в 0 при синхронизации Ч это вызывало
-       // удвоение коррекции с нул€ и накопительный разнос st_adjust.
-       // prv_dev сохран€ет последнюю измеренную скорость дрейфа (мс/ч),
-       // чтобы следующий вызов hw_adjust видел реальный исходный уровень.
-       // prv_dev := 0;
-       drift_ema := 0;
-      end
-    else
-       prv_dev := calct;
-   end;
-
-
- ////////////////////////////////////////////////////////////////////////////////////////////////////////
- /////                  ќтработка синхронизации  системных часов WINDOWS                           //////
- ////////////////////////////////////////////////////////////////////////////////////////////////////////
-
- if sync_expected then
-    begin
-     Inc (sync_cnt);
-
-     if Abs (dta_ms) > 80 then dta_ms := Sign (dta_ms) * 80; // strict
-
-     if (ema_delta = 0) then
-        ema_delta := dta_ms * 0.9
-     else
-       begin
-        if ( Abs(dta_ms) < Abs (ema_delta) ) then
-           ema_delta := (ema_delta * 0.3) + dta_ms * 0.7
-        else
-           ema_delta := (ema_delta * 0.9) + dta_ms * 0.1;
-       end;
-
-
-
-
-     // ' + IfV (ntp_sync, 'NTP servers pool', '
-     s := '-------------------------------------------------------------------------------------------------------------------------'#13#10;
-     s := s + '[~d ~T].~C0F #MSG(Sync): Synсhronizing clocks with ~C0E PFC timer' +
-              '~C0F, correcting delta(sec) ' + IfV (dta > 0, '~C0A', '~C0C') +
-               FormatFloat('0.###', dta / DT_ONE_SECOND) + '~C0F';
-
-
-     if ( last_sync_elps >= 50000 ) and ( ema_delta <> 0 ) then
-      begin
-
-       cum_dvg := cum_dvg + dta;
-       calct := cum_dvg / DT_ONE_SECOND;
-
-       ct := (MSEC_IN_HOUR / last_sync_elps);
-       add := ema_delta *  ct * 0.75;
-
-       dta := dta * aprox_fact; // применить коэффициент приближени€
-
-       //
-       s := s + ', with value ' + IfV (dta > 0, '~C0A', '~C0C') + FormatFloat('0.###', dta / DT_ONE_SECOND) + '~C0F';
-       s := s + ', cumulative delta(sec) ' + IfV (calct > 0, '~C0A', '~C0C') + FormatFloat('0.###', calct) + ' ~C0F';
-
-       s := s + #13#10#9#9'       ~C0E#DBG(Sync): ema_delta =~C0D ' + ftow(ema_delta, '%.5f') +
-                  '~C0E msec,~C0F (' + FormatFloat('0.###', ema_delta * ct ) +  ' ms/h) ~C0E' +
-                  ' ratio for dta = ~C0D' + ftow(ct, '%.5f') + '~C0E, add =~C0D ' + ftow(add, '%.5f');
-
-      end;
-
-     s := s + '~C0B'#13#10#9#9'       ';
-     s := s + '#DBG(Sync): sync_cnt =~C0D ' + IntToStr (sync_cnt) + '~C0B';
-     s := s + ', local timer ticks ~C0E' + IfV (dta > 0, 'slower', 'faster') + '~C0B';
-     s := s + ', from last sync elapsed = ~C0D' + FmtDelay ( last_sync_elps, 7, 's') + '~C0B';
-
-
-     ODS(s + '~C07');
-     if Abs (dta) > 1000 then
-       begin
-        // больша€ дельта
-        Windows.Beep (1000, 230);
-        Windows.Beep (600, 230);
-        Windows.Beep (1300, 230);
-       end;
-
-     TickAdjust (2);
-     dt := CurrentDateTime + dta;
-     pt.StartOne (VTT_LAST_SYNC);
-     // DateTimeToSystemTime (dt, st);
-     clk_pfc_dev.Clear;                 // <<<<<<<<<<<<<<< при синхронизации статистика портитс€
-     IndySetLocalTime (dt);
-
-     if g_timer.OwnRights then
-       begin
-        slot := g_timer.ActiveSlot^;
-        slot.clock_syn := DateTimeToTimeStamp (dt).Time; // расхождение периодов
-        g_timer.Update ( slot );
-       end;
-
-     last_time := dt;
-     if ntp_sync then Inc (ntp_sync_cnt);
-    end
-  else
-   // отклонение синхронизации
-     begin
-      last_sync_elps := pt.Elapsed (VTT_LAST_SYNC);
-      ct := last_sync_elps / 1000;   // сколько прошло с последней синхронизации
-      if ct <= 500 then exit;
-      ctc := dta / DT_ONE_MSEC;         // расхождение в мсек
-      calct := ( ctc /  ct * 3600.0 ); // дельта в час  { 200 / 60 * 3600  }
-
-      ODS( CFormat ('[~d ~T]. #DBG: Sync delta %s, is outbound settings %.1f - %.1f, from last sync elapsed = %s, stable dev = %7.1f ms/h',
-          '~C07', [FmtDelay (ctc), min_dvg, max_dvg, FmtDelay(last_sync_elps), calct]) );
-
-      ct := ntp_diver / DT_ONE_MSEC;
-      s := InfoFmt('~D ~T;', g_timer.GetTime) + Format('%.3f;%.3f;%d;%d;', [ctc, ct, st_adjust, pwm_split] );
-      SaveToLog(nosync_log, s);
-       // calct := dta_ms / last_sync_elps * 3600 * 1000; // расхождение за час оценочное
-     end;
 
 
   WriteDriftLog (dta_ms, calct, ntp_diver / DT_ONE_MSEC, last_chk_elps, sync_expected, ntp_sync);
@@ -2161,7 +2443,7 @@ begin
 
  if ( clock_res > 0 ) and ( act <> target_res ) then
    begin
-    ODS( CFormat('[~T]. #DBG: updating timer resolution from %d to %d', '~C07', [act, target_res]) );
+    wprintf('[~T]. #DBG: updating timer resolution from %d to %d~C07', [act, target_res]);
     SetTimerResolution ( target_res, TRUE, act );
    end;
 
@@ -2215,16 +2497,16 @@ begin
        end;
 
      if bMsg then
-        ODS( CFormat('[~d ~T].~C0B #DBG: tick set to %d nsu(%.3f ms), ' +
-                  'base = %s ms, last = %d nsu (%s), TI = %d, sta/h = %.0f, cpu = %.4f, side = %d, swcnt = %d, result =%s', '~C07',
-                   [ucnt, ucnt / 10000.0,
-                    s,    lcnt, IfV (tad, 'disabled', 'enabled'),
-                    tinc, st_dev, avg_cpu_load, pwm_side, st_adjust_cnt, rv]));
+        wprintf('[~d ~T].~C0B #DBG: tick set to %d nsu(%.3f ms), ' +
+                'base = %s ms, last = %d nsu (%s), TI = %d, sta/h = %.0f, cpu = %.4f, side = %d, swcnt = %d, result =%s~C07',
+                [ucnt, ucnt / 10000.0,
+                 s,    lcnt, IfV(tad, 'disabled', 'enabled'),
+                 tinc, st_dev, avg_cpu_load, pwm_side, st_adjust_cnt, rv]);
     end
    else
     begin
       if bMsg then
-       ODS( CFormat('[~d ~T]. #DBG: Clock adjustment value is equal previous (%d), sta/h = %d', '~C07', [lcnt, st_adjust]) );
+       wprintf('[~d ~T]. #DBG: Clock adjustment value is equal previous (%d), sta/h = %d~C07', [lcnt, st_adjust]);
      result := TRUE;
     end;
  except
@@ -2418,4 +2700,4 @@ begin
 end;
 
 
-end.
+end.                                                                                                                          

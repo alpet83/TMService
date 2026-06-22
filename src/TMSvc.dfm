@@ -7,17 +7,18 @@ object svcTime: TsvcTime
   OnShutdown = ServiceShutdown
   OnStart = ServiceStart
   OnStop = ServiceStop
-  Height = 411
-  Width = 371
+  Height = 617
+  Width = 557
+  PixelsPerInch = 144
   object tmrCheck: TTimer
     OnTimer = tmrCheckTimer
-    Left = 16
-    Top = 16
+    Left = 24
+    Top = 24
   end
   object tmrFast: TTimer
     Interval = 500
     OnTimer = tmrFastTimer
-    Left = 112
-    Top = 104
+    Left = 168
+    Top = 156
   end
 end

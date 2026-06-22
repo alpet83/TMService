@@ -58,7 +58,7 @@
         <VerInfo_IncludeVerInfo>true</VerInfo_IncludeVerInfo>
         <DCC_Namespace>System;Xml;Data;Datasnap;Web;Soap;Vcl;Winapi;System.Win;$(DCC_Namespace)</DCC_Namespace>
         <VerInfo_Release>2</VerInfo_Release>
-        <DCC_ExeOutput>..\bin</DCC_ExeOutput>
+        <DCC_ExeOutput>P:\Projects\bin</DCC_ExeOutput>
         <DCC_DcuOutput>P:\Projects\build\$(Platform)\$(Config)</DCC_DcuOutput>
         <DCC_UnitSearchPath>F:\Indy\Lib\Core;F:\Indy\Lib\Protocols;F:\Indy\Lib\System;P:\Projects\Lib;$(DCC_UnitSearchPath)</DCC_UnitSearchPath>
         <DCC_DependencyCheckOutputName>..\bin\TMService.exe</DCC_DependencyCheckOutputName>
@@ -69,6 +69,7 @@
         <DCC_S>false</DCC_S>
         <DCC_F>false</DCC_F>
         <DCC_K>false</DCC_K>
+        <DCC_Description>SNTP client and server for high accuracy correction</DCC_Description>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Base_Win32)'!=''">
         <DCC_Namespace>Data.Win;Datasnap.Win;Web.Win;Soap.Win;Xml.Win;Bde;$(DCC_Namespace)</DCC_Namespace>
@@ -89,13 +90,11 @@
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_1_Win32)'!=''">
         <Debugger_RunParams>wait_dbg</Debugger_RunParams>
-        <VerInfo_Build>42</VerInfo_Build>
-        <VerInfo_AutoIncVersion>true</VerInfo_AutoIncVersion>
+        <VerInfo_Build>53</VerInfo_Build>
         <VerInfo_Locale>1033</VerInfo_Locale>
         <DCC_DebugInformation>2</DCC_DebugInformation>
-        <Manifest_File>$(BDS)\bin\default_app.manifest</Manifest_File>
-        <VerInfo_Keys>CompanyName=Fora-Capital Inc.;FileDescription=Служба точного времени TMService;FileVersion=1.0.2.42;InternalName=TMService;LegalCopyright=(c) 2010 Петров А. М.;LegalTrademarks=;OriginalFilename=TMService.exe;ProductName=SNTP client-server with a statistical analyzer;ProductVersion=1.0.2;Comments=;ProgramID=com.embarcadero.TMService</VerInfo_Keys>
-        <AppEnableRuntimeThemes>true</AppEnableRuntimeThemes>
+        <AppDPIAwarenessMode>none</AppDPIAwarenessMode>
+        <VerInfo_Keys>CompanyName=Fora-Capital Inc.;FileDescription=Служба точного времени TMService;FileVersion=1.0.2.53;InternalName=TMService;LegalCopyright=(c) 2010 Петров А. М.;LegalTrademarks=;OriginalFilename=TMService.exe;ProductName=SNTP client-server with a statistical analyzer;ProductVersion=1.0.2;Comments=;ProgramID=com.embarcadero.TMService</VerInfo_Keys>
     </PropertyGroup>
     <PropertyGroup Condition="'$(Cfg_2)'!=''">
         <DCC_DebugInformation>2</DCC_DebugInformation>
@@ -185,7 +184,8 @@
                     <VersionInfoKeys Name="Comments"/>
                 </VersionInfoKeys>
                 <Excluded_Packages>
-                    <Excluded_Packages Name="$(BDSBIN)\dcloffice2k220.bpl">Microsoft Office 2000 Sample Automation Server Wrapper Components</Excluded_Packages>
+                    <Excluded_Packages Name="$(BDSBIN)\dcloffice2k290.bpl">Microsoft Office 2000 Sample Automation Server Wrapper Components</Excluded_Packages>
+                    <Excluded_Packages Name="$(BDSBIN)\dclofficexp290.bpl">Microsoft Office XP Sample Automation Server Wrapper Components</Excluded_Packages>
                 </Excluded_Packages>
             </Delphi.Personality>
             <Platforms>

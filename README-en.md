@@ -83,11 +83,58 @@ Looked up at `c:\Apps\conf\tmservice.conf` by default. Format: INI.
 | `EmaSpeedMode` | int | `0` | Mode for updating the baseline clock speed EMA (`st_adjust_ema`): `0` = update at a drift extremum (transition from rising to falling); `1` = update only when the last 2 `\|dta_ms\|` measurements are both below `EmaSpeedThr`. |
 | `EmaSpeedThr` | float (ms) | `0.8` | `\|dta_ms\|` threshold for `EmaSpeedMode=1`. The EMA is updated only if both recent drift measurements fell below this value. |
 | `MicroCorr` | int (µs) | `-20` | Micro-correction passed to the NTP client (`IdSNTP1.mcs`). Compensates for systematic NTP packet processing delay. |
+| `NTPUncertaintyGuard` | bool | `1` | When enabled, skips the NTP sync step if the measured offset `\|ntp_ms\|` is smaller than the measurement floor (`meas_floor = rtt_half + pool_disp`). In other words: if the clock is already within the noise floor of the NTP measurement, do not disturb it. Logs `#DBG: NTP diver … within meas_floor …, sync skipped`. Default `1` (enabled). |
 | `PFCTrust` | float | `1.0` | Trust coefficient for the PFC timer when no NTP sync has occurred. Scales the clock speed correction signal (`ref_dta`) in cycles where NTP servers were not queried. Range: `0.0`..`1.0`. See the section below. |
+| `NTPNuclearMs` | float (ms) | `15.0` | Lower bound of the nuclear zone. When `\|ntp_ms\|` exceeds this value the normal acceptance curve no longer applies. Two sub-zones above this threshold are governed by `min_dvg` from `[bounds]` — see the NTP acceptance curve section for details. |
+| `NTPNuclearFloor` | float | `0.15` | Speed correction factor applied in the **semi-nuclear zone** (`NTPNuclearMs ≤ \|ntp_ms\| < min_dvg`). In this range hard correction is not available (offset below `min_dvg`), so a small non-zero factor keeps the speed control from stalling. Default `0.15`. Set to `0` to disable the semi-nuclear nudge entirely. |
+| `NTPStreakCount` | int | `3` | Number of consecutive same-sign NTP readings required to apply the ×0.5 factor in either nuclear zone. Prevents the control loop from chasing oscillation noise. |
+| `NTPAproxLowMs` | float (ms) | `3.0` | Lower bound of the NTP acceptance curve. At `\|ntp_ms\|` below this value the speed correction factor is fixed at `NTPAproxLow` (skeptical zone — NTP jitter dominates). |
+| `NTPAproxHighMs` | float (ms) | `15.0` | Upper bound of the NTP acceptance curve (defaults to `NTPNuclearMs`). At `\|ntp_ms\|` above this value the factor reaches `NTPAproxHigh`. |
+| `NTPAproxLow` | float | `0.25` | Speed correction factor applied when `\|ntp_ms\| ≤ NTPAproxLowMs`. Conservative — avoids over-correcting in response to NTP jitter near zero. |
+| `NTPAproxHigh` | float | `0.9` | Speed correction factor applied when `\|ntp_ms\|` is at `NTPAproxHighMs`. Linear interpolation is used between `NTPAproxLow` and `NTPAproxHigh` for values in the `[NTPAproxLowMs, NTPAproxHighMs]` range. |
 
 ---
 
-#### PFCTrust — anchor trust coefficient
+#### Clock correction modes
+
+TMService operates in one of two modes each check cycle, selected by comparing the current PFC↔system clock offset (`|dta_ms|`) against `min_dvg` and `max_dvg` from the `[bounds]` section.
+
+---
+
+**Soft speed-tuning window** — active when `|dta_ms| < min_dvg` (default 125 ms)
+
+The offset is small enough to correct gradually without jumping the clock. The algorithm computes a speed correction signal `ref_dta` (ms/h) and applies it to `st_adjust` — the argument to `SetSystemTimeAdjustment`. This makes the Windows timer tick fractionally faster or slower until the offset is absorbed.
+
+Parameters that control correction aggressiveness in this mode:
+
+| Situation | Parameter | Effect |
+|---|---|---|
+| NTP sync **not** queried this cycle | `PFCTrust` | Scales `ref_dta` by 0–1. Limits over-correction when the PFC anchor is noisy. |
+| NTP sync **was** queried this cycle | `NTPAproxLow/High`, `NTPNuclearMs`, `NTPStreakCount` | NTP acceptance curve — scales `ref_dta` based on `\|ntp_ms\|`. See section below. |
+| Fine-tuning zone `\|dta_ms\| < 1 ms` | `RefDtaEmaTC` | Smooths `ref_dta` via fast EMA to suppress measurement noise. |
+| EMA baseline for `st_adjust` | `EmaSpeedMode`, `EmaSpeedThr` | Captures the stable operating point of `st_adjust` for snap-to on zero-crossing. |
+
+Speed adjustment is **blocked** whenever hard correction fires (the modes are mutually exclusive).
+
+---
+
+**Hard correction mode** — active when `min_dvg ≤ |dta_ms| ≤ max_dvg`
+
+The offset is too large for gradual speed adjustment. `IndySetLocalTime` is called to jump the system clock directly to the PFC timer value. Speed adjustment (`st_adjust`) is **not changed** during this call — only the position is corrected. After the call the drift history (`clk_pfc_dev`) is cleared so the speed loop restarts cleanly.
+
+Parameters that control hard correction:
+
+| Parameter | Effect |
+|---|---|
+| `AproxFactor` | Fraction of the offset applied per cycle: `dta := dta × AproxFactor`. At 0.87, 87% of the offset is corrected each minute; the remainder converges in subsequent cycles. Prevents overshoot. |
+| `min_dvg` | Minimum offset to trigger a hard correction. Below this value only speed tuning runs. Lower values widen the soft window. |
+| `max_dvg` | Maximum offset above which hard correction is also suppressed (anomaly guard). |
+
+If the offset persistently exceeds `min_dvg` (e.g. due to a TSC jump or power event), hard correction fires every cycle until the position error is absorbed, then the system returns to the soft speed-tuning window.
+
+---
+
+#### PFCTrust — anchor trust coefficient (soft mode)
 
 The PFC timer (TSC-based) acts as an **anchor**: its readings determine how much the system clock is ahead or behind (`dta_ms`), and the speed correction (`ref_dta → st_adjust`) is derived from that. While the anchor is stable, this works well. But the anchor can be unstable:
 
@@ -116,7 +163,76 @@ With PFCTrust=0.1: correction ×0.1, st_adjust ±500 — much calmer
 | `0.1`–`0.2` | Minimal correction without NTP. For severely unstable PFC (older Hyper-V, VirtualBox). |
 | `0.0` | Clock speed correction frozen until the next NTP sync. Only NTP events move `st_adjust`. |
 
-The parameter takes effect **only when no NTP query occurred in the current cycle** (`ntp_sync = false`). After an NTP sync the correction is always applied at full weight — at that point there is confirmation from an external reference.
+The parameter takes effect **only in the soft speed-tuning window** and **only when no NTP query occurred in the current cycle** (`ntp_sync = false`). When NTP did query this cycle, correction scaling is handled by the NTP acceptance curve instead (see below). Both parameters are mutually exclusive per cycle and have no effect during hard correction mode.
+
+---
+
+#### NTP acceptance curve — speed correction during NTP sync (soft mode)
+
+When `ntp_sync = true`, the speed correction signal (`ref_dta`) is scaled by a factor derived from the **magnitude of the NTP-measured offset** (`|ntp_ms|`). The goal is to prevent the control loop from over-correcting during large oscillations or from chasing NTP jitter when the clock is nearly on target.
+
+**Four zones, anchored to `min_dvg`:**
+
+```
+|ntp_ms| < NTPAproxLowMs (3 ms)
+    → factor = NTPAproxLow (0.25)
+    Skeptical zone: NTP jitter likely dominates. Quarter-weight correction.
+
+NTPAproxLowMs ≤ |ntp_ms| < NTPNuclearMs (15 ms)
+    → factor = linear NTPAproxLow → NTPAproxHigh (0.25 → 0.9)
+    Normal zone: offset is real. Correction scales with confidence.
+
+NTPNuclearMs ≤ |ntp_ms| < min_dvg (125 ms)  — semi-nuclear zone
+    → factor = NTPNuclearFloor (0.15)  [or 0.5 if streak ≥ NTPStreakCount]
+    Hard correction is NOT available (offset below min_dvg threshold).
+    A small speed nudge keeps the system clock from stalling completely.
+    The gentle factor prevents oscillation while allowing gradual catch-up.
+
+|ntp_ms| ≥ min_dvg (125 ms)  — full nuclear zone
+    → factor = 0.0  [or 0.5 if streak ≥ NTPStreakCount]
+    Hard correction (IndySetLocalTime) handles the position directly.
+    Speed correction on top would cause double-correction and oscillation.
+    Only systematic drift (confirmed streak) re-enables mild speed tuning.
+```
+
+The boundary between semi-nuclear and full-nuclear is `min_dvg` (from `[bounds]`), not a separate parameter. This ensures the two correction mechanisms — speed tuning and hard position reset — are always cleanly separated with no dead zone between them.
+
+**Relationship to `PFCTrust`:**
+- `PFCTrust` applies when **no NTP sync** occurred this cycle (uncertainty in anchor).
+- The NTP acceptance curve applies when **NTP sync did occur** (uncertainty in measurement magnitude).
+- The two mechanisms are mutually exclusive per cycle.
+
+**Oscillation damping analogy:** the full-nuclear-zone suppression acts like a pendulum brake — when the clock is far enough from zero that `IndySetLocalTime` fires, the algorithm does not also push the pendulum speed. Instead it waits for the positional correction to settle. Only after seeing the same sign repeatedly does it conclude "the pendulum is biased, not just oscillating" and re-enables speed tuning at half strength. In the semi-nuclear zone (offset too large for the acceptance curve, but too small for hard correction), a gentle `NTPNuclearFloor` nudge keeps the speed control alive without causing oscillation.
+
+---
+
+#### NTP uncertainty guard — minimum error threshold
+
+Before any correction is applied, TMService checks whether the measured NTP offset is actually distinguishable from the noise floor of the measurement itself. If not, the sync step is skipped entirely.
+
+**Measurement floor estimate:**
+
+```
+meas_floor_ms = rtt_half_ms  +  pool_disp_ms
+```
+
+- `rtt_half_ms = min_RTD / 2` — half the smallest round-trip delay among the selected NTP servers. This is the best-case one-way asymmetry bound: even on a perfectly symmetric path we cannot know the offset better than RTD/2.
+- `pool_disp_ms` — maximum deviation of any selected server from the weighted-mean offset. Captures disagreement between sources.
+
+The sum is the **measurement floor**: the minimum achievable offset uncertainty for this poll cycle. Any measured offset below it is indistinguishable from measurement noise.
+
+**Decision rule:**
+
+```
+|ntp_diver_ms| < meas_floor_ms  →  sync skipped (offset within noise floor)
+|ntp_diver_ms| ≥ meas_floor_ms  →  sync proceeds normally
+```
+
+When skipped, `ntp_diver` is set to zero and `ntp_sync` stays `false` for this cycle. The NTP acceptance curve and `AdjustPFCTimerSpeed` are not called. The clock continues to coast on the PFC timer with `PFCTrust` scaling.
+
+**Practical effect:** on a well-tuned system with `|dta_ms| < 1 ms`, NTP pool RTD is typically 5–30 ms, giving `meas_floor ≈ 2.5–15 ms`. An offset of 0.5 ms would be below the noise floor and would not trigger a correction — avoiding unnecessary disturbance of a stable clock.
+
+All three components — `pool_disp`, `rtt_half`, and `meas_floor` — are logged on every NTP poll at the `#DBG` verbosity level.
 
 ---
 
@@ -144,6 +260,54 @@ Thresholds that govern the correction algorithm's operating mode.
 (*) — known limitation: when drift persistently exceeds `min_dvg`, hardware speed correction
 is blocked and the program performs a hard time reset every minute instead of smooth
 adjustment. Lowering `min_dvg` (e.g. to 50 ms) widens the hw_adjust operating zone.
+
+---
+
+## Console log messages
+
+TMService uses prefixes to indicate message severity. Understanding them helps distinguish normal operation from real problems.
+
+### Prefix legend
+
+`#DBG` — debug/trace, verbose internal state. Normal; can be suppressed by lowering `log_verbose_level` (keyboard **V**).  
+`#MSG` — informational. Normal operating events (NTP query result, sync performed, etc.).  
+`#LOADCFG` — configuration loaded or reloaded. Appears at startup and on keyboard **C**.  
+`#RELOAD` — runtime config reload triggered by keyboard **C**.  
+`#STAT` — peer sync statistics (only when `EnableSyncStat=1`).  
+`#WARN` — condition worth attention, but service continues. See table below.  
+`#ERR` / `PrintError` — recoverable error.
+
+### Common `#WARN` messages
+
+**`#WARN: g_timer not sync, hurry diff = X ms`**  
+The virtual timer (`TVirtualTimer`, shared memory `Global\VIRTUALTIMER`) has drifted more than 1 ms from the reference PFC anchor. The service auto-corrects the timer rate (`DiffTimer.PFCRatio`) in the same step. Occasional appearance is normal during the first few VTT sync cycles after startup or after a hard time correction. Persistent appearance (every sync cycle) indicates the VTT period is too short or the PFC timer itself is unstable — check `VTSyncRate` and `PFCTrust`.
+
+**`#WARN: g_timer.OwnRights = false`**  
+The service does not hold owner rights on the shared timer memory block. This should not occur in normal service operation — it means another process owns the block, or the service is running as a reader. Check that no second instance is running.
+
+**`#WARN: not have rights for g_timer`**  
+Same as above but logged from the clock-adjustment path. The shared block update was skipped.
+
+**`#WARN: NTPServer feature switched off — may be UDP port 123 already used`**  
+Binding of the built-in SNTP server to UDP port 123 failed (most likely another NTP daemon is running). The client-side NTP synchronisation is unaffected. Either stop the conflicting service or set `EnableNTPServer=0`.
+
+**`#WARN: Hard time syncrhonizing — more than one week delta correction`**  
+NTP returned a time more than 7 days away from the current system clock. The service performs a hard `SetLocalTime` to the NTP value. Expected after a long offline period or after the RTC battery fails and the clock resets to a default date.
+
+**`#WARN: Time response HH:MM:SS overrides with HH:MM:SS, due 5 seconds error`**  
+A previously accepted NTP response was superseded by a later, more consistent response that differed by more than 5 seconds. The later value is used. Can appear when the first polled server is heavily out of sync while a second server returns the correct time.
+
+**`#WARN: Cannot open timer section, trying to create new`** *(DateTimeTools)*  
+The shared memory slot for the VirtualTimer could not be opened; a new slot is being created. Normal during the very first run or after a slot index mismatch. Not normal if it repeats every startup — check permissions on `Global\` named objects.
+
+### Keyboard controls (console window)
+
+| Key | Action |
+|-----|--------|
+| **E** | Graceful shutdown |
+| **V** | Cycle log verbosity (0 → 1 → … → 7 → 0) |
+| **C** | Reload configuration from INI file (including NTP server list) |
+| **+** / **−** | Increase / decrease `st_adjust` by 15 ms/h and apply immediately |
 
 ---
 
